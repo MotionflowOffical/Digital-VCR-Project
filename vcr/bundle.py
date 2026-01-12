@@ -5,7 +5,12 @@ from typing import Tuple, Dict, Any
 import numpy as np
 
 from .tape import TapeImage, TapeTrack, TapeCartridge, TapeAudio
-from .audio import write_wav_mono_pcm16, read_wav_mono_pcm16
+from .audio import (
+    write_wav_mono_pcm16,
+    read_wav_mono_pcm16,
+    pcm16_to_ulaw,
+    ulaw_to_pcm16,
+)
 
 MODE_TO_U8 = {"SP": 0, "LP": 1, "EP": 2}
 U8_TO_MODE = {0: "SP", 1: "LP", 2: "EP"}
@@ -209,16 +214,31 @@ def save_bundle(folder: str, tape: TapeImage, settings: Dict[str, Any], *, compr
     c_data = np.concatenate(c_chunks, axis=0) if c_chunks else np.zeros((0,), np.uint8)
 
     save_fn = np.savez_compressed if compress else np.savez
-    save_fn(out / "tape.npz",
-                        track_index=indices,
-                        y_data=y_data, c_data=c_data,
-                        y_offsets=y_offsets, c_offsets=c_offsets,
-                        y_h=y_h, y_w=y_w, y_mod_w=y_mod_w,
-                        c_h=c_h, c_w=c_w,
-                        luma_bw=luma_bw, dt=dt, fps=fps,
-                        frame_idx=frame_idx, field_idx=field_idx,
-                        head_u8=head_u8, mode_u8=mode_u8,
-                        ctl_sync_u8=ctl_sync_u8, ctl_vjit_u8=ctl_vjit_u8)
+    payload = dict(
+        track_index=indices,
+        y_data=y_data,
+        c_data=c_data,
+        y_offsets=y_offsets,
+        c_offsets=c_offsets,
+        y_h=y_h,
+        y_w=y_w,
+        y_mod_w=y_mod_w,
+        c_h=c_h,
+        c_w=c_w,
+        luma_bw=luma_bw,
+        dt=dt,
+        fps=fps,
+        frame_idx=frame_idx,
+        field_idx=field_idx,
+        head_u8=head_u8,
+        mode_u8=mode_u8,
+        ctl_sync_u8=ctl_sync_u8,
+        ctl_vjit_u8=ctl_vjit_u8,
+    )
+    if audio_ulaw is not None and audio_ulaw.size > 0:
+        payload["audio_ulaw"] = audio_ulaw.astype(np.uint8)
+        payload["audio_sr"] = np.array([int(audio_sr)], dtype=np.int32)
+    save_fn(out / "tape.npz", **payload)
 
 def load_bundle(folder: str) -> Tuple[TapeImage, Dict[str, Any]]:
     src = Path(folder)
