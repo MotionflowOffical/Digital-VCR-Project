@@ -10,6 +10,8 @@ from pathlib import Path
 import time
 import traceback
 import datetime
+import importlib
+import importlib.util
 
 from ..tape import TapeImage, TapeCartridge, TapeTrack
 from ..bundle import save_bundle, load_bundle, create_blank_bundle
@@ -20,11 +22,18 @@ from ..editor import Editor, DubOptions
 from ..player import VCRPlayer
 from ..audio_player import AudioPlayer
 from ..exporter import export_playback_video_mp4, ExportOptions, export_audio_and_optional_mux
+from ..audio import apply_audio_record_defects
 from ..defects import (
     RecordDefects, PlaybackDefects, AudioRecordDefects, AudioPlaybackDefects,
     settings_to_dict, settings_from_dict
 )
 from ..modulation import decode_field_bgr
+
+
+def _get_sounddevice_module():
+    if importlib.util.find_spec("sounddevice") is None:
+        return None
+    return importlib.import_module("sounddevice")
 
 class VScrollFrame(ttk.Frame):
     def __init__(self, parent, width=340, **kwargs):
@@ -130,11 +139,18 @@ class DigitalVCRApp:
         self.live_player = VCRPlayer()
         self._live_worker_thread = threading.Thread(target=self._live_worker_loop, daemon=True)
         self._live_worker_thread.start()
+        self._live_audio_stream = None
+        self._live_audio_anchor_time = 0.0
+        self._live_audio_anchor_track = 0.0
+        self._live_audio_devices = []
 
         # Cached defect objects (updated on main thread; worker threads never touch Tk vars)
         self._cached_rec_def = self.rec_def
         self._cached_pb_def = self.pb_def
         self._cached_ap_def = self.ap_def
+        self._cached_ar_def = self.ar_def
+        self._cached_live_audio_enabled = False
+        self._cached_live_audio_device = "Default"
         # Optional RAM proxy (JPEG frames) for smooth playback
         self._proxy = None
 
@@ -156,6 +172,10 @@ class DigitalVCRApp:
         try:
             if self._live_cap is not None:
                 self._live_cap.release()
+        except Exception:
+            pass
+        try:
+            self._stop_live_audio()
         except Exception:
             pass
         try:
@@ -188,6 +208,9 @@ class DigitalVCRApp:
                 elif kind == "status_edit":
                     if hasattr(self, "edit_status"):
                         self.edit_status.set(payload)
+                elif kind == "status_live":
+                    if hasattr(self, "live_status"):
+                        self.live_status.set(payload)
                 elif kind == "status_play":
                     self.play_status.set(payload)
                 elif kind == "preview_rec":
@@ -219,6 +242,7 @@ class DigitalVCRApp:
             self._cached_rec_def = r
             self._cached_pb_def = p
             self._cached_ap_def = ap
+            self._cached_ar_def = self._current_audio_record_defects()
 
             try:
                 self._cached_live_downscale_width = int(getattr(self, "var_live_downscale_width").get())
@@ -226,6 +250,14 @@ class DigitalVCRApp:
                 pass
             try:
                 self._cached_live_tape_mode = str(getattr(self, "live_tape_mode_var").get())
+            except Exception:
+                pass
+            try:
+                self._cached_live_audio_enabled = bool(getattr(self, "live_audio_enable_var").get())
+            except Exception:
+                pass
+            try:
+                self._cached_live_audio_device = str(getattr(self, "live_audio_dev_var").get())
             except Exception:
                 pass
         except Exception:
@@ -951,6 +983,20 @@ class DigitalVCRApp:
         ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
         ttk.Label(left, text="Live controls (audio record)").pack(anchor="w")
 
+        audio_row = ttk.Frame(left)
+        audio_row.pack(anchor="w", fill="x", pady=(2, 0))
+        self.live_audio_enable_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(audio_row, text="Enable live audio capture", variable=self.live_audio_enable_var).pack(anchor="w")
+
+        ttk.Label(left, text="Audio input device").pack(anchor="w")
+        audio_dev_row = ttk.Frame(left)
+        audio_dev_row.pack(anchor="w", fill="x", pady=(2, 4))
+        self.live_audio_dev_var = tk.StringVar(value="Default")
+        self.live_audio_combo = ttk.Combobox(audio_dev_row, textvariable=self.live_audio_dev_var, width=28, state="readonly")
+        self.live_audio_combo.pack(side="left", padx=(0, 6))
+        ttk.Button(audio_dev_row, text="Refresh", command=self._refresh_audio_devices).pack(side="left")
+        self._refresh_audio_devices()
+
         # Audio record-side sliders
         self._slider(left, "Audio wow/flutter", "wow", 0.0, 1.0, key="ar")
         self._slider(left, "Audio hiss", "hiss", 0.0, 1.0, key="ar")
@@ -1055,6 +1101,45 @@ class DigitalVCRApp:
             pass
         self.live_cam_combo.bind("<<ComboboxSelected>>", lambda _e: self.live_cam_var.set(int(self.live_cam_combo.get())))
 
+    def _refresh_audio_devices(self):
+        sd = _get_sounddevice_module()
+        if sd is None:
+            try:
+                self.live_audio_combo["values"] = ["(sounddevice not installed)"]
+                self.live_audio_combo.set("(sounddevice not installed)")
+                self.live_audio_combo.config(state="disabled")
+            except Exception:
+                pass
+            return
+
+        inputs = []
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            devices = []
+        for idx, dev in enumerate(devices):
+            try:
+                if int(dev.get("max_input_channels", 0)) > 0:
+                    name = str(dev.get("name", f"Input {idx}"))
+                    inputs.append((idx, name))
+            except Exception:
+                continue
+
+        values = ["Default"]
+        for idx, name in inputs:
+            values.append(f"{idx}: {name}")
+        self._live_audio_devices = [None] + [idx for idx, _ in inputs]
+
+        try:
+            self.live_audio_combo.config(state="readonly")
+            self.live_audio_combo["values"] = values
+            cur = str(self.live_audio_dev_var.get()) if hasattr(self, "live_audio_dev_var") else "Default"
+            if cur not in values:
+                cur = "Default"
+            self.live_audio_dev_var.set(cur)
+        except Exception:
+            pass
+
     def _toggle_live(self):
         try:
             on = bool(self.live_toggle_var.get())
@@ -1072,6 +1157,7 @@ class DigitalVCRApp:
                 self.live_status.set("Live mode: off")
             except Exception:
                 pass
+            self._stop_live_audio()
 
     def _toggle_live_overlay(self):
         try:
@@ -1136,6 +1222,119 @@ class DigitalVCRApp:
             except Exception:
                 pass
 
+    def _stop_live_audio(self):
+        stream = getattr(self, "_live_audio_stream", None)
+        if stream is not None:
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        self._live_audio_stream = None
+
+    def _update_live_audio_anchor(self, base_tracks: int):
+        with self.lock:
+            self._live_audio_anchor_time = time.perf_counter()
+            self._live_audio_anchor_track = float(base_tracks)
+
+    def _write_live_audio_block(self, samples: np.ndarray, sr: int, anchor_time: float, anchor_track: float):
+        if samples is None or samples.size == 0:
+            return
+        with self.lock:
+            tape = getattr(self, "_live_tape", None)
+            if tape is None:
+                return
+            pcm = tape.audio.pcm16
+            if pcm is None or pcm.size == 0:
+                return
+            total = pcm.size
+
+        now = time.perf_counter()
+        block_start_time = now - (samples.size / float(sr))
+        track_start = anchor_track + (block_start_time - anchor_time) * 60.0
+        sample_start = int((track_start / 60.0) * sr)
+        sample_start = sample_start % total
+
+        try:
+            ar_def = getattr(self, "_cached_ar_def", self.ar_def)
+            samples = apply_audio_record_defects(
+                samples.astype(np.int16, copy=False),
+                sr,
+                wow=float(getattr(ar_def, "wow", 0.0)),
+                hiss=float(getattr(ar_def, "hiss", 0.0)),
+                dropouts=float(getattr(ar_def, "dropouts", 0.0)),
+                compression=float(getattr(ar_def, "compression", 0.55)),
+            )
+        except Exception:
+            pass
+
+        end = sample_start + samples.size
+        with self.lock:
+            if end <= total:
+                pcm[sample_start:end] = samples
+            else:
+                first = total - sample_start
+                pcm[sample_start:total] = samples[:first]
+                remain = samples.size - first
+                if remain > 0:
+                    pcm[0:remain] = samples[first:first + remain]
+
+    def _start_live_audio(self):
+        sd = _get_sounddevice_module()
+        if sd is None:
+            self._q("status_live", "Live audio: sounddevice not available.")
+            return
+
+        tape = getattr(self, "_live_tape", None)
+        if tape is None:
+            return
+
+        sr = int(getattr(tape.audio, "sample_rate", 44100) or 44100)
+        tape_len_s = float(tape.cart.length_tracks) / 60.0
+        need_n = int(tape_len_s * sr)
+        if tape.audio.pcm16 is None or tape.audio.pcm16.size != need_n:
+            tape.audio.sample_rate = sr
+            tape.audio.pcm16 = np.zeros((need_n,), dtype=np.int16)
+
+        device = None
+        try:
+            sel = str(getattr(self, "_cached_live_audio_device", "Default"))
+            if sel and sel != "Default":
+                device = int(sel.split(":", 1)[0])
+        except Exception:
+            device = None
+
+        def callback(indata, frames, _time_info, status):
+            if status:
+                self._q("status_live", f"Live audio warning: {status}")
+            try:
+                samples = indata[:, 0].copy()
+            except Exception:
+                return
+            with self.lock:
+                anchor_time = float(getattr(self, "_live_audio_anchor_time", 0.0))
+                anchor_track = float(getattr(self, "_live_audio_anchor_track", 0.0))
+            if anchor_time <= 0.0:
+                return
+            self._write_live_audio_block(samples, sr, anchor_time, anchor_track)
+
+        try:
+            stream = sd.InputStream(
+                samplerate=sr,
+                channels=1,
+                dtype="int16",
+                device=device,
+                callback=callback,
+            )
+            stream.start()
+            self._live_audio_stream = stream
+        except Exception as exc:
+            self._live_audio_stream = None
+            self._q("status_live", f"Live audio: failed to start ({exc})")
+
     def _live_worker_loop(self):
         # Worker thread: capture camera -> encode to tape tracks -> decode via player -> store latest frame
         t_last = time.perf_counter()
@@ -1143,6 +1342,8 @@ class DigitalVCRApp:
         while not self._live_worker_stop.is_set():
             try:
                 if not getattr(self, "_live_on", False):
+                    if self._live_audio_stream is not None:
+                        self._stop_live_audio()
                     time.sleep(0.05)
                     continue
 
@@ -1177,6 +1378,15 @@ class DigitalVCRApp:
                     self.live_player.insert()
                     self.live_player.play()
                     self._live_seg_id = int(time.time()*1000) & 0x7fffffff
+                    self._update_live_audio_anchor(0)
+                    try:
+                        sr = int(getattr(self._live_tape.audio, "sample_rate", 44100) or 44100)
+                        tape_len_s = float(self._live_tape.cart.length_tracks) / 60.0
+                        need_n = int(tape_len_s * sr)
+                        self._live_tape.audio.sample_rate = sr
+                        self._live_tape.audio.pcm16 = np.zeros((need_n,), dtype=np.int16)
+                    except Exception:
+                        pass
 
                     self._q("status_live", f"Live: camera {cam_idx} opened")
                     t_last = time.perf_counter()
@@ -1218,6 +1428,13 @@ class DigitalVCRApp:
                     self.live_player.state._last_pos_tracks = 0.0
                     self.live_player._cache.clear()
                     base = 0
+                    self._update_live_audio_anchor(base)
+
+                audio_enabled = bool(getattr(self, "_cached_live_audio_enabled", False))
+                if audio_enabled and self._live_audio_stream is None:
+                    self._start_live_audio()
+                elif (not audio_enabled) and self._live_audio_stream is not None:
+                    self._stop_live_audio()
 
                 # Capture frame (drop buffered frames if we fall behind to avoid 'fast old frames')
                 try:
@@ -1726,4 +1943,3 @@ class DigitalVCRApp:
             compression=_g("var_ar_compression", getattr(self.ar_def, "compression", 0.55)),
 
         )
-
