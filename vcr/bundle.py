@@ -6,10 +6,8 @@ import numpy as np
 
 from .tape import TapeImage, TapeTrack, TapeCartridge, TapeAudio
 from .audio import (
-    write_wav_mono_pcm16,
-    read_wav_mono_pcm16,
-    pcm16_to_ulaw,
-    ulaw_to_pcm16,
+    write_wav_mono_pcm16, read_wav_mono_pcm16,
+    pcm16_to_ulaw, ulaw_to_pcm16,
 )
 
 MODE_TO_U8 = {"SP": 0, "LP": 1, "EP": 2}
@@ -43,13 +41,11 @@ def create_blank_bundle(folder: str, *, length_tracks: int, settings: Dict[str, 
     (out / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
     (out / "tape_info.json").write_text(json.dumps(tape_info, indent=2), encoding="utf-8")
 
-    # Empty compact tape container (matches load_bundle expectations)
-    np.savez(out / "tape.npz",
+    # Empty compact tape containers
+    np.savez(out / "tape_luma.npz",
              track_index=np.zeros((0,), np.int32),
              y_data=np.zeros((0,), np.uint8),
-             c_data=np.zeros((0,), np.uint8),
              y_offsets=np.zeros((1,), np.int64),
-             c_offsets=np.zeros((1,), np.int64),
              y_h=np.zeros((0,), np.uint16),
              y_w=np.zeros((0,), np.uint16),
              y_mod_w=np.zeros((0,), np.uint16),
@@ -63,7 +59,15 @@ def create_blank_bundle(folder: str, *, length_tracks: int, settings: Dict[str, 
              head_u8=np.zeros((0,), np.uint8),
              mode_u8=np.zeros((0,), np.uint8),
              ctl_sync_u8=np.zeros((0,), np.uint8),
-             ctl_vjit_u8=np.zeros((0,), np.uint8))
+             ctl_vjit_u8=np.zeros((0,), np.uint8),
+             real_rf_u8=np.zeros((0,), np.uint8),
+             rf_chroma_fc_frac=np.zeros((0,), np.float32),
+             rf_chroma_lpf=np.zeros((0,), np.float32))
+
+    np.savez(out / "tape_chroma.npz",
+             track_index=np.zeros((0,), np.int32),
+             c_data=np.zeros((0,), np.uint8),
+             c_offsets=np.zeros((1,), np.int64))
 
 
 def _pack_track_meta(tr: TapeTrack):
@@ -83,6 +87,11 @@ def _pack_track_meta(tr: TapeTrack):
         "mode_u8": int(MODE_TO_U8.get(str(m.get("tape_mode","SP")), 0)),
         "ctl_sync_u8": int(m.get("ctl_sync_u8", 255)),
         "ctl_vjit_u8": int(m.get("ctl_vjit_u8", 0)),
+
+        # RF model flags / params (per-track, so they survive save/load)
+        "real_rf_u8": 1 if bool(m.get("real_rf_modulation", False)) else 0,
+        "rf_chroma_fc_frac": float(m.get("rf_chroma_fc_frac", 0.12)),
+        "rf_chroma_lpf": float(m.get("rf_chroma_lpf", 0.35)),
     }
 
 def _base_decode_meta(global_info: Dict[str, Any], packed: Dict[str, Any]) -> Dict[str, Any]:
@@ -115,6 +124,11 @@ def _base_decode_meta(global_info: Dict[str, Any], packed: Dict[str, Any]) -> Di
         "tape_mode": U8_TO_MODE.get(int(packed["mode_u8"]), "SP"),
         "ctl_sync_u8": int(packed["ctl_sync_u8"]),
         "ctl_vjit_u8": int(packed["ctl_vjit_u8"]),
+
+        # RF model flags / params
+        "real_rf_modulation": bool(int(packed.get("real_rf_u8", 0)) != 0),
+        "rf_chroma_fc_frac": float(packed.get("rf_chroma_fc_frac", 0.12)),
+        "rf_chroma_lpf": float(packed.get("rf_chroma_lpf", 0.35)),
     }
     return meta
 
@@ -152,21 +166,29 @@ def save_bundle(folder: str, tape: TapeImage, settings: Dict[str, Any], *, compr
     (out / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
     (out / "tape_info.json").write_text(json.dumps(global_info, indent=2), encoding="utf-8")
 
-    audio_ulaw = None
-    audio_sr = int(tape.audio.sample_rate or 44100)
-    if embed_audio and tape.audio.pcm16 is not None and tape.audio.pcm16.size > 0:
-        try:
-            audio_ulaw = pcm16_to_ulaw(tape.audio.pcm16)
-        except Exception:
-            audio_ulaw = None
-
     if tape.audio.pcm16 is not None and tape.audio.pcm16.size > 0:
         write_wav_mono_pcm16(str(out / "audio.wav"), tape.audio.pcm16, tape.audio.sample_rate)
-        # Separate "audio tape" file (requested): stored alongside video tape.npz
-        try:
-            np.savez_compressed(str(out / "audio_tape.npz"), audio_pcm16=tape.audio.pcm16.astype(np.int16), audio_sr=np.array([int(audio_sr)], dtype=np.int32))
-        except Exception:
-            pass
+        # Separate audio tape file (compact); load_bundle will prefer this.
+        if embed_audio:
+            try:
+                audio_sr = int(tape.audio.sample_rate or 44100)
+                aul = pcm16_to_ulaw(tape.audio.pcm16)
+                np.savez_compressed(
+                    str(out / "audio_tape.npz"),
+                    audio_ulaw=aul.astype(np.uint8),
+                    audio_sr=np.array([audio_sr], dtype=np.int32),
+                )
+            except Exception:
+                # fall back to raw pcm
+                try:
+                    audio_sr = int(tape.audio.sample_rate or 44100)
+                    np.savez_compressed(
+                        str(out / "audio_tape.npz"),
+                        audio_pcm16=tape.audio.pcm16.astype(np.int16),
+                        audio_sr=np.array([audio_sr], dtype=np.int32),
+                    )
+                except Exception:
+                    pass
 
     indices = np.array(sorted(tape.cart.tracks.keys()), dtype=np.int32)
     n = int(indices.size)
@@ -191,6 +213,9 @@ def save_bundle(folder: str, tape: TapeImage, settings: Dict[str, Any], *, compr
     mode_u8 = np.zeros((n,), dtype=np.uint8)
     ctl_sync_u8 = np.zeros((n,), dtype=np.uint8)
     ctl_vjit_u8 = np.zeros((n,), dtype=np.uint8)
+    real_rf_u8 = np.zeros((n,), dtype=np.uint8)
+    rf_chroma_fc_frac = np.zeros((n,), dtype=np.float32)
+    rf_chroma_lpf = np.zeros((n,), dtype=np.float32)
 
     for k, idx in enumerate(indices.tolist()):
         tr = tape.cart.tracks[int(idx)]
@@ -203,6 +228,9 @@ def save_bundle(folder: str, tape: TapeImage, settings: Dict[str, Any], *, compr
         frame_idx[k] = packed["frame_idx"]; field_idx[k] = packed["field_idx"]
         head_u8[k] = packed["head_u8"]; mode_u8[k] = packed["mode_u8"]
         ctl_sync_u8[k] = packed["ctl_sync_u8"]; ctl_vjit_u8[k] = packed["ctl_vjit_u8"]
+        real_rf_u8[k] = int(packed.get("real_rf_u8", 0))
+        rf_chroma_fc_frac[k] = float(packed.get("rf_chroma_fc_frac", 0.12))
+        rf_chroma_lpf[k] = float(packed.get("rf_chroma_lpf", 0.35))
 
         y = tr.y_dphi8.astype(np.uint8).reshape(-1)
         c = tr.c_u8.astype(np.uint8).reshape(-1)
@@ -214,31 +242,27 @@ def save_bundle(folder: str, tape: TapeImage, settings: Dict[str, Any], *, compr
     c_data = np.concatenate(c_chunks, axis=0) if c_chunks else np.zeros((0,), np.uint8)
 
     save_fn = np.savez_compressed if compress else np.savez
-    payload = dict(
+    save_fn(
+        out / "tape_luma.npz",
         track_index=indices,
         y_data=y_data,
-        c_data=c_data,
         y_offsets=y_offsets,
-        c_offsets=c_offsets,
-        y_h=y_h,
-        y_w=y_w,
-        y_mod_w=y_mod_w,
-        c_h=c_h,
-        c_w=c_w,
-        luma_bw=luma_bw,
-        dt=dt,
-        fps=fps,
-        frame_idx=frame_idx,
-        field_idx=field_idx,
-        head_u8=head_u8,
-        mode_u8=mode_u8,
-        ctl_sync_u8=ctl_sync_u8,
-        ctl_vjit_u8=ctl_vjit_u8,
+        y_h=y_h, y_w=y_w, y_mod_w=y_mod_w,
+        c_h=c_h, c_w=c_w,
+        luma_bw=luma_bw, dt=dt, fps=fps,
+        frame_idx=frame_idx, field_idx=field_idx,
+        head_u8=head_u8, mode_u8=mode_u8,
+        ctl_sync_u8=ctl_sync_u8, ctl_vjit_u8=ctl_vjit_u8,
+        real_rf_u8=real_rf_u8,
+        rf_chroma_fc_frac=rf_chroma_fc_frac,
+        rf_chroma_lpf=rf_chroma_lpf,
     )
-    if audio_ulaw is not None and audio_ulaw.size > 0:
-        payload["audio_ulaw"] = audio_ulaw.astype(np.uint8)
-        payload["audio_sr"] = np.array([int(audio_sr)], dtype=np.int32)
-    save_fn(out / "tape.npz", **payload)
+    save_fn(
+        out / "tape_chroma.npz",
+        track_index=indices,
+        c_data=c_data,
+        c_offsets=c_offsets,
+    )
 
 def load_bundle(folder: str) -> Tuple[TapeImage, Dict[str, Any]]:
     src = Path(folder)
@@ -248,9 +272,53 @@ def load_bundle(folder: str) -> Tuple[TapeImage, Dict[str, Any]]:
     if length_tracks <= 0:
         raise ValueError("Invalid tape_info.json (length_tracks).")
 
-    z = np.load(src / "tape.npz", allow_pickle=False)
-    # New compact format
-    if "track_index" in z:
+    # Prefer split luma/chroma files (v6.13.3+)
+    luma_path = src / "tape_luma.npz"
+    chroma_path = src / "tape_chroma.npz"
+    legacy_path = src / "tape.npz"
+
+    if luma_path.exists() and chroma_path.exists():
+        zL = np.load(luma_path, allow_pickle=False)
+        zC = np.load(chroma_path, allow_pickle=False)
+
+        indices = zL["track_index"].astype(np.int32)
+        y_data = zL["y_data"].astype(np.uint8)
+        y_offsets = zL["y_offsets"].astype(np.int64)
+
+        idx_c = zC["track_index"].astype(np.int32)
+        if idx_c.size != indices.size or (idx_c.size and not np.all(idx_c == indices)):
+            raise ValueError("Chroma tape does not match luma tape (track_index mismatch).")
+        c_data = zC["c_data"].astype(np.uint8)
+        c_offsets = zC["c_offsets"].astype(np.int64)
+
+        # Per-track meta arrays
+        y_h = zL["y_h"].astype(np.uint16)
+        y_w = zL["y_w"].astype(np.uint16)
+        y_mod_w = zL["y_mod_w"].astype(np.uint16)
+        c_h = zL["c_h"].astype(np.uint16)
+        c_w = zL["c_w"].astype(np.uint16)
+        luma_bw = zL["luma_bw"].astype(np.float32)
+        dt = zL["dt"].astype(np.float32)
+        fps = zL["fps"].astype(np.float32)
+        frame_idx = zL["frame_idx"].astype(np.int32)
+        field_idx = zL["field_idx"].astype(np.int32)
+        head_u8 = zL["head_u8"].astype(np.uint8)
+        mode_u8 = zL["mode_u8"].astype(np.uint8)
+        ctl_sync_u8 = zL["ctl_sync_u8"].astype(np.uint8)
+        ctl_vjit_u8 = zL["ctl_vjit_u8"].astype(np.uint8)
+        real_rf_u8 = (zL["real_rf_u8"].astype(np.uint8)
+                      if "real_rf_u8" in zL.files else np.zeros_like(head_u8).astype(np.uint8))
+        rf_chroma_fc_frac = (zL["rf_chroma_fc_frac"].astype(np.float32)
+                             if "rf_chroma_fc_frac" in zL.files else (np.zeros_like(luma_bw).astype(np.float32) + 0.12))
+        rf_chroma_lpf = (zL["rf_chroma_lpf"].astype(np.float32)
+                         if "rf_chroma_lpf" in zL.files else (np.zeros_like(luma_bw).astype(np.float32) + 0.35))
+
+    else:
+        # Legacy single-file format
+        z = np.load(legacy_path, allow_pickle=False)
+        if "track_index" not in z:
+            raise ValueError("Unsupported bundle format (no track_index). Re-save the bundle with v6+.")
+
         indices = z["track_index"].astype(np.int32)
         y_data = z["y_data"].astype(np.uint8)
         c_data = z["c_data"].astype(np.uint8)
@@ -273,55 +341,65 @@ def load_bundle(folder: str) -> Tuple[TapeImage, Dict[str, Any]]:
         ctl_sync_u8 = z["ctl_sync_u8"].astype(np.uint8)
         ctl_vjit_u8 = z["ctl_vjit_u8"].astype(np.uint8)
 
-        cart = TapeCartridge(length_tracks=length_tracks, tracks={})
-        tape = TapeImage(cart=cart, audio=TapeAudio())
+        # Defaults (legacy bundles won't have these)
+        real_rf_u8 = (z["real_rf_u8"].astype(np.uint8)
+                      if "real_rf_u8" in z.files else np.zeros_like(head_u8).astype(np.uint8))
+        rf_chroma_fc_frac = (z["rf_chroma_fc_frac"].astype(np.float32)
+                             if "rf_chroma_fc_frac" in z.files else (np.zeros_like(luma_bw).astype(np.float32) + 0.12))
+        rf_chroma_lpf = (z["rf_chroma_lpf"].astype(np.float32)
+                         if "rf_chroma_lpf" in z.files else (np.zeros_like(luma_bw).astype(np.float32) + 0.35))
 
-        wav = src / "audio.wav"
-        # Prefer embedded audio inside tape.npz, fallback to audio.wav
+    cart = TapeCartridge(length_tracks=length_tracks, tracks={})
+    tape = TapeImage(cart=cart, audio=TapeAudio())
+
+    wav = src / "audio.wav"
+    audio_npz = src / "audio_tape.npz"
+    # Prefer audio_tape.npz (compact), fallback to audio.wav
+    if audio_npz.exists():
         try:
-            if "audio_ulaw" in z and "audio_sr" in z:
-                aul = z["audio_ulaw"].astype(np.uint8)
-                asr = int(z["audio_sr"].astype(np.int32).reshape(-1)[0]) if z["audio_sr"].size else 44100
-                if aul.size > 0:
+            az = np.load(audio_npz, allow_pickle=False)
+            if "audio_ulaw" in az and "audio_sr" in az:
+                aul = az["audio_ulaw"].astype(np.uint8)
+                asr = int(az["audio_sr"].astype(np.int32).reshape(-1)[0]) if az["audio_sr"].size else 44100
+                if aul.size:
                     tape.audio.pcm16 = ulaw_to_pcm16(aul)
                     tape.audio.sample_rate = asr
-            elif "audio_pcm16" in z and "audio_sr" in z:
-                apcm = z["audio_pcm16"].astype(np.int16)
-                asr = int(z["audio_sr"].astype(np.int32).reshape(-1)[0]) if z["audio_sr"].size else 44100
-                if apcm.size > 0:
+            elif "audio_pcm16" in az and "audio_sr" in az:
+                apcm = az["audio_pcm16"].astype(np.int16)
+                asr = int(az["audio_sr"].astype(np.int32).reshape(-1)[0]) if az["audio_sr"].size else 44100
+                if apcm.size:
                     tape.audio.pcm16 = apcm
                     tape.audio.sample_rate = asr
         except Exception:
             pass
-        if (tape.audio.pcm16 is None or tape.audio.pcm16.size == 0) and wav.exists():
-            pcm, sr = read_wav_mono_pcm16(str(wav))
-            tape.audio.pcm16 = pcm
-            tape.audio.sample_rate = sr
+    if (tape.audio.pcm16 is None or tape.audio.pcm16.size == 0) and wav.exists():
+        pcm, sr = read_wav_mono_pcm16(str(wav))
+        tape.audio.pcm16 = pcm
+        tape.audio.sample_rate = sr
 
-        # Keep backing arrays alive (views in TapeTrack point into these)
-        cart.bundle_backing = {"y_data": y_data, "c_data": c_data}
+    # Keep backing arrays alive (views in TapeTrack point into these)
+    cart.bundle_backing = {"y_data": y_data, "c_data": c_data}
 
-        n = int(indices.size)
-        for k in range(n):
-            idx = int(indices[k])
-            ys, ye = int(y_offsets[k]), int(y_offsets[k+1])
-            cs, ce = int(c_offsets[k]), int(c_offsets[k+1])
+    n = int(indices.size)
+    for k in range(n):
+        idx = int(indices[k])
+        ys, ye = int(y_offsets[k]), int(y_offsets[k+1])
+        cs, ce = int(c_offsets[k]), int(c_offsets[k+1])
 
-            packed = {
-                "y_h": int(y_h[k]), "y_w": int(y_w[k]), "y_mod_w": int(y_mod_w[k]),
-                "c_h": int(c_h[k]), "c_w": int(c_w[k]),
-                "luma_bw": float(luma_bw[k]),
-                "dt": float(dt[k]), "fps": float(fps[k]),
-                "frame_idx": int(frame_idx[k]), "field_idx": int(field_idx[k]),
-                "head_u8": int(head_u8[k]), "mode_u8": int(mode_u8[k]),
-                "ctl_sync_u8": int(ctl_sync_u8[k]), "ctl_vjit_u8": int(ctl_vjit_u8[k]),
-            }
-            meta = _base_decode_meta(tape_info, packed)
-            # Views (no copy) => fast load and low memory
-            tr = TapeTrack(y_dphi8=y_data[ys:ye], c_u8=c_data[cs:ce], meta=meta)
-            tape.cart.set(idx, tr)
+        packed = {
+            "y_h": int(y_h[k]), "y_w": int(y_w[k]), "y_mod_w": int(y_mod_w[k]),
+            "c_h": int(c_h[k]), "c_w": int(c_w[k]),
+            "luma_bw": float(luma_bw[k]),
+            "dt": float(dt[k]), "fps": float(fps[k]),
+            "frame_idx": int(frame_idx[k]), "field_idx": int(field_idx[k]),
+            "head_u8": int(head_u8[k]), "mode_u8": int(mode_u8[k]),
+            "ctl_sync_u8": int(ctl_sync_u8[k]), "ctl_vjit_u8": int(ctl_vjit_u8[k]),
+            "real_rf_u8": int(real_rf_u8[k]),
+            "rf_chroma_fc_frac": float(rf_chroma_fc_frac[k]),
+            "rf_chroma_lpf": float(rf_chroma_lpf[k]),
+        }
+        meta = _base_decode_meta(tape_info, packed)
+        tr = TapeTrack(y_dphi8=y_data[ys:ye], c_u8=c_data[cs:ce], meta=meta)
+        tape.cart.set(idx, tr)
 
-        return tape, settings
-
-    # Backward compatibility: old format (v5) had JSON files; let user know
-    raise ValueError("Unsupported bundle format (no track_index). Re-save the bundle with v6+.")
+    return tape, settings

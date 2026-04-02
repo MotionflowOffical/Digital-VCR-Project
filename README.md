@@ -17,11 +17,6 @@ pip install -r requirements.txt
 python main.py
 ```
 
-### Testing
-```bash
-python -m pytest
-```
-
 ### Where is my tape saved?
 - If you click **New tape bundle (creates folder now)**, the tape is created on disk immediately.
 - Recording updates the in-memory tape and then **auto-saves back into that same bundle** (if enabled).
