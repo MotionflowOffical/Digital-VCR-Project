@@ -202,8 +202,3 @@ tools/
 └── capture_screen.py
 ```
 
-## Notes
-
-- The app is designed as an **experimental VHS/tape simulator**, not as a physically exact deck emulator.
-- The newer RF path is a **lightweight analog-style model**, not a full hardware-level simulation.
-- Newer saves prefer the split-bundle format, but the project keeps legacy bundle loading for compatibility.
