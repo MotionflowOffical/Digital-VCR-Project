@@ -50,7 +50,8 @@ def dphi_u8_to_luma(u8: np.ndarray, out_len: int, sample_rate: int, f0: float, f
 def encode_field_bgr(field_bgr: np.ndarray, sample_rate: int = 2_000_000,
                      f0: float = 350_000.0, fdev: float = 120_000.0,
                      chroma_subsample: int = 2,
-                     luma_bw: float = 0.66) -> tuple[np.ndarray, np.ndarray, dict]:
+                     luma_bw: float = 0.66,
+                     chroma_bw: float = 1.0) -> tuple[np.ndarray, np.ndarray, dict]:
     rgb = field_bgr[..., ::-1].astype(np.float32) / 255.0
     y, cb, cr = rgb_to_ycbcr(rgb)
     h, w = y.shape
@@ -59,7 +60,10 @@ def encode_field_bgr(field_bgr: np.ndarray, sample_rate: int = 2_000_000,
     y_mod = cv2.resize(y, (y_mod_w, h), interpolation=cv2.INTER_AREA)
 
     ch = max(1, h // chroma_subsample)
-    cw = max(1, w // chroma_subsample)
+    # Horizontal chroma bandwidth is typically narrower than luma on VHS.
+    # Apply an extra multiplier so users can tune chroma softness independently.
+    cbw = float(np.clip(chroma_bw, 0.15, 1.0))
+    cw = max(1, int((w / float(chroma_subsample)) * cbw))
     cb_s = cv2.resize(cb, (cw, ch), interpolation=cv2.INTER_AREA)
     cr_s = cv2.resize(cr, (cw, ch), interpolation=cv2.INTER_AREA)
 
@@ -80,11 +84,12 @@ def encode_field_bgr(field_bgr: np.ndarray, sample_rate: int = 2_000_000,
         "fdev": float(fdev),
         "chroma_subsample": int(chroma_subsample),
         "luma_bw": float(luma_bw),
+        "chroma_bw": float(cbw),
         **dmeta
     }
     return y_dphi8, c_u8, meta
 
-def decode_field_bgr(y_dphi8: np.ndarray, c_u8: np.ndarray, meta: dict) -> np.ndarray:
+def decode_field_bgr(y_dphi8: np.ndarray, c_u8: np.ndarray, meta: dict, *, bleed: float = 0.0) -> np.ndarray:
     y_h, y_w = meta["y_shape"]
     y_mod_w = int(meta.get("y_mod_w", y_w))
     c_h, c_w = meta["c_shape"]
@@ -107,6 +112,22 @@ def decode_field_bgr(y_dphi8: np.ndarray, c_u8: np.ndarray, meta: dict) -> np.nd
     cr_u8 = cu[1::2].reshape(c_h, c_w).astype(np.float32) / 255.0
     cb = cv2.resize(cb_u8, (y_w, y_h), interpolation=cv2.INTER_LINEAR)
     cr = cv2.resize(cr_u8, (y_w, y_h), interpolation=cv2.INTER_LINEAR)
+
+    # Optional controlled luma/chroma cross-talk at recombination.
+    # This is deliberately subtle; it exists so you can keep the tapes separated
+    # and then re-introduce "composite" behaviour with a single knob.
+    b = float(np.clip(bleed, 0.0, 1.0))
+    if b > 1e-6:
+        # Luma -> chroma: lowpassed luma leaks into chroma channels (color wash / false tint)
+        y_lp = cv2.GaussianBlur(y.astype(np.float32), (0, 0), sigmaX=1.2 + 2.2*b, sigmaY=0)
+        leak = (y_lp - 0.5) * (0.10 + 0.22*b)
+        cb = np.clip(cb + leak, 0.0, 1.0)
+        cr = np.clip(cr + leak, 0.0, 1.0)
+
+        # Chroma -> luma: chroma energy slightly modulates luma (cross-color feel)
+        ce = np.sqrt((cb - 0.5) ** 2 + (cr - 0.5) ** 2).astype(np.float32)
+        ce = cv2.GaussianBlur(ce, (0, 0), sigmaX=0.8 + 1.6*b, sigmaY=0)
+        y = np.clip(y + (ce - ce.mean()) * (0.06 + 0.12*b), 0.0, 1.0)
 
     rgb01 = ycbcr_to_rgb(y, cb, cr)
     bgr = (rgb01[..., ::-1] * 255.0).astype(np.uint8)

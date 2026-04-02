@@ -12,6 +12,25 @@ class RecordDefects:
     record_rf_noise: float = 0.030
     record_dropouts: float = 0.018
     luma_bw: float = 0.66
+    # Horizontal chroma bandwidth multiplier applied on top of chroma_subsample.
+    # 1.0 = current behaviour, smaller values reduce chroma detail (more VHS-like).
+    chroma_bw: float = 1.0
+
+    # --- Optional higher-fidelity RF model (FM + AM carrier simulation) ---
+    # When enabled, recording runs an RF "round-trip":
+    #   luma -> FM carrier (with AM envelope + nonlinearity + noise) -> demod -> stored as dphi8
+    # This keeps playback fast while making RF defects more analog-like.
+    real_rf_modulation: bool = False
+    # FM deviation scaling around the middle of the dphi range.
+    # 1.0 = neutral. Smaller values reduce deviation (less robust, softer/noisier).
+    # Larger values increase deviation (more robust, slightly "hotter" carrier).
+    rf_fm_depth: float = 1.0
+    rf_am_depth: float = 0.25          # 0..1 amplitude modulation depth (envelope ripple)
+    rf_nonlinearity: float = 0.25      # 0..1 soft clipping / saturation in RF
+    rf_carrier_noise: float = 0.20     # 0..1 extra carrier noise (in addition to record_rf_noise)
+    rf_phase_noise: float = 0.10       # 0..1 phase jitter applied to RF carrier
+    rf_chroma_fc_frac: float = 0.12    # 0..0.5 fraction of sample_rate for chroma subcarrier
+    rf_chroma_lpf: float = 0.35        # 0..1 demod low-pass strength
 
 @dataclass
 class PlaybackDefects:
@@ -53,6 +72,19 @@ class PlaybackDefects:
     chroma_noise_freq: float = 0.55  # how often chroma noise bursts
     chroma_wobble: float = 0.10      # slow chroma phase wobble amount
     chroma_wobble_freq: float = 0.55 # how often wobble is active
+
+    # Controlled cross-talk between luma and chroma at recombination.
+    # 0 = fully separated, 1 = heavy cross-talk.
+    luma_chroma_bleed: float = 0.0
+
+    # Optional RF playback model: apply RF-like AM/FM channel effects before decode.
+    # (If the tape was recorded with real_rf_modulation, playback will enable this automatically.)
+    rf_playback_model: bool = False
+    rf_playback_fm_depth: float = 1.0
+    rf_playback_am_depth: float = 0.18
+    rf_playback_nonlinearity: float = 0.20
+    rf_playback_carrier_noise: float = 0.20
+    rf_playback_phase_noise: float = 0.12
 
 
     brightness: float = 0.0

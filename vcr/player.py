@@ -7,6 +7,7 @@ from collections import OrderedDict
 
 from .tape import TapeImage
 from .modulation import decode_field_bgr
+from .rf_model import rf_roundtrip_luma_dphi_u8, rf_roundtrip_chroma_u8
 from .defects import (
     PlaybackDefects,
     apply_rf_defects_y_dphi_u8, apply_rf_defects_chroma_u8,
@@ -117,6 +118,32 @@ class VCRPlayer:
         self._snow = SnowField()
         self._phase = 0.0
 
+    def _pair_base(self, tape: TapeImage, idx: int) -> int:
+        """Align a track index to the first field of its recorded frame.
+
+        The recorder writes two consecutive fields per source frame.
+        If playback starts on the second field, weaving will combine fields from
+        adjacent frames, which looks like digital tearing/combing and can make
+        small text unreadable.
+
+        Each recorded track stores `frame_base_track` in its meta so we can pair
+        correctly even if recording started on an odd track index.
+        """
+        L = int(tape.cart.length_tracks)
+        if L < 2:
+            return 0
+        i = int(np.clip(int(idx), 0, L - 2))
+        tr = tape.cart.get(i)
+        if tr is not None:
+            try:
+                fb = int(tr.meta.get("frame_base_track", i - (i % 2)))
+                fb = int(np.clip(fb, 0, L - 2))
+                return fb
+            except Exception:
+                pass
+        # Fallback for legacy bundles: assume even/odd pairing.
+        return int(i - (i % 2))
+
     def _cache_get(self, idx: int, token: int):
         """Return cached decoded field if it matches the current track object.
 
@@ -211,7 +238,8 @@ class VCRPlayer:
                 s.lock = min(s.lock, 0.10)
                 s.inserting_timer = min(s.inserting_timer, 1.0)
 
-        base = int(s.pos_tracks)
+        # Pair fields to their recorded frame boundary to avoid weaving mismatched fields.
+        base = self._pair_base(tape, int(s.pos_tracks))
         t0 = tape.cart.get(base)
         t1 = tape.cart.get(base+1)
         # Segment boundary: entering a newly-recorded region should destabilize lock briefly.
@@ -367,9 +395,46 @@ class VCRPlayer:
 
 
         mode = str(tr.meta.get("tape_mode","SP"))
-        y = apply_rf_defects_y_dphi_u8(tr.y_dphi8, rf_noise, dropouts, mode, lock=lock)
-        c = apply_rf_defects_chroma_u8(tr.c_u8, rf_noise * (0.8 + pb.chroma_noise), dropouts, mode)
-        img = decode_field_bgr(y, c, tr.meta)
+
+        # If the tape was recorded with the RF round-trip, or the user explicitly enabled RF playback,
+        # apply carrier-level model here before decode.
+        use_rf = bool(tr.meta.get('real_rf_modulation', False)) or bool(getattr(pb, 'rf_playback_model', False))
+        if use_rf:
+            try:
+                y = rf_roundtrip_luma_dphi_u8(
+                    tr.y_dphi8,
+                    tr.meta,
+                    noise=float(rf_noise),
+                    dropouts=float(dropouts),
+                    mode=mode,
+                    fm_depth=float(getattr(pb, 'rf_playback_fm_depth', float(tr.meta.get('rf_fm_depth', 1.0)))),
+                    am_depth=float(getattr(pb, 'rf_playback_am_depth', 0.18)),
+                    nonlinearity=float(getattr(pb, 'rf_playback_nonlinearity', 0.20)),
+                    carrier_noise=float(getattr(pb, 'rf_playback_carrier_noise', 0.20)),
+                    phase_noise=float(getattr(pb, 'rf_playback_phase_noise', 0.12)),
+                )
+                c = rf_roundtrip_chroma_u8(
+                    tr.c_u8,
+                    tr.meta,
+                    noise=float(rf_noise) * (0.8 + float(getattr(pb, 'chroma_noise', 0.12))),
+                    dropouts=float(dropouts),
+                    mode=mode,
+                    fc_frac=float(tr.meta.get('rf_chroma_fc_frac', 0.12)),
+                    lpf_strength=float(tr.meta.get('rf_chroma_lpf', 0.35)),
+                    am_depth=float(getattr(pb, 'rf_playback_am_depth', 0.18)),
+                    nonlinearity=float(getattr(pb, 'rf_playback_nonlinearity', 0.20)),
+                    carrier_noise=float(getattr(pb, 'rf_playback_carrier_noise', 0.20)),
+                    phase_noise=float(getattr(pb, 'rf_playback_phase_noise', 0.12)),
+                )
+            except Exception:
+                # Fallback to simpler byte-space RF defects
+                y = apply_rf_defects_y_dphi_u8(tr.y_dphi8, rf_noise, dropouts, mode, lock=lock)
+                c = apply_rf_defects_chroma_u8(tr.c_u8, rf_noise * (0.8 + pb.chroma_noise), dropouts, mode)
+        else:
+            y = apply_rf_defects_y_dphi_u8(tr.y_dphi8, rf_noise, dropouts, mode, lock=lock)
+            c = apply_rf_defects_chroma_u8(tr.c_u8, rf_noise * (0.8 + pb.chroma_noise), dropouts, mode)
+
+        img = decode_field_bgr(y, c, tr.meta, bleed=float(getattr(pb, 'luma_chroma_bleed', 0.0)))
         self._cache_put(idx, token, img)
         return img
 
@@ -386,7 +451,8 @@ class VCRPlayer:
             base = self._snow.apply(base, 0.55 + 0.45*float(getattr(pb,'snow',0.18)), dropout_boost=0.10)
             return base
 
-        base = int(s.pos_tracks)
+        # Pair fields to their recorded frame boundary to avoid weaving mismatched fields.
+        base = self._pair_base(tape, int(s.pos_tracks))
         f0 = self._decode_track_with_rf(tape, base, pb)
         f1 = self._decode_track_with_rf(tape, base+1, pb)
         if f0 is None or f1 is None:

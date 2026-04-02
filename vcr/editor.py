@@ -99,12 +99,20 @@ class Editor:
             field0b = apply_record_defects_to_field(field0, rec_def)
             field1b = apply_record_defects_to_field(field1, rec_def)
 
-            y0, c0, meta0 = encode_field_bgr(field0b, sample_rate=opts.sample_rate,
-                                             chroma_subsample=opts.chroma_subsample,
-                                             luma_bw=rec_def.luma_bw)
-            y1, c1, meta1 = encode_field_bgr(field1b, sample_rate=opts.sample_rate,
-                                             chroma_subsample=opts.chroma_subsample,
-                                             luma_bw=rec_def.luma_bw)
+            y0, c0, meta0 = encode_field_bgr(
+                field0b,
+                sample_rate=opts.sample_rate,
+                chroma_subsample=opts.chroma_subsample,
+                luma_bw=rec_def.luma_bw,
+                chroma_bw=float(getattr(rec_def, 'chroma_bw', 1.0)),
+            )
+            y1, c1, meta1 = encode_field_bgr(
+                field1b,
+                sample_rate=opts.sample_rate,
+                chroma_subsample=opts.chroma_subsample,
+                luma_bw=rec_def.luma_bw,
+                chroma_bw=float(getattr(rec_def, 'chroma_bw', 1.0)),
+            )
 
             y0 = apply_rf_defects_y_dphi_u8(y0, rec_def.record_rf_noise, rec_def.record_dropouts, rec_def.tape_mode)
             c0 = apply_rf_defects_chroma_u8(c0, rec_def.record_rf_noise, rec_def.record_dropouts, rec_def.tape_mode)

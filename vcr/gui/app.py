@@ -10,30 +10,23 @@ from pathlib import Path
 import time
 import traceback
 import datetime
-import importlib
-import importlib.util
+import json
 
 from ..tape import TapeImage, TapeCartridge, TapeTrack
 from ..bundle import save_bundle, load_bundle, create_blank_bundle
-from ..recorder import Recorder, RecordOptions
+from ..recorder import Recorder, RecordOptions, sample_fields_from_frame
 from ..modulation import encode_field_bgr
 from ..defects import apply_record_defects_to_field, apply_rf_defects_y_dphi_u8, apply_rf_defects_chroma_u8
+from ..rf_model import rf_roundtrip_luma_dphi_u8, rf_roundtrip_chroma_u8
 from ..editor import Editor, DubOptions
 from ..player import VCRPlayer
 from ..audio_player import AudioPlayer
 from ..exporter import export_playback_video_mp4, ExportOptions, export_audio_and_optional_mux
-from ..audio import apply_audio_record_defects
 from ..defects import (
     RecordDefects, PlaybackDefects, AudioRecordDefects, AudioPlaybackDefects,
     settings_to_dict, settings_from_dict
 )
 from ..modulation import decode_field_bgr
-
-
-def _get_sounddevice_module():
-    if importlib.util.find_spec("sounddevice") is None:
-        return None
-    return importlib.import_module("sounddevice")
 
 class VScrollFrame(ttk.Frame):
     def __init__(self, parent, width=340, **kwargs):
@@ -139,18 +132,11 @@ class DigitalVCRApp:
         self.live_player = VCRPlayer()
         self._live_worker_thread = threading.Thread(target=self._live_worker_loop, daemon=True)
         self._live_worker_thread.start()
-        self._live_audio_stream = None
-        self._live_audio_anchor_time = 0.0
-        self._live_audio_anchor_track = 0.0
-        self._live_audio_devices = []
 
         # Cached defect objects (updated on main thread; worker threads never touch Tk vars)
         self._cached_rec_def = self.rec_def
         self._cached_pb_def = self.pb_def
         self._cached_ap_def = self.ap_def
-        self._cached_ar_def = self.ar_def
-        self._cached_live_audio_enabled = False
-        self._cached_live_audio_device = "Default"
         # Optional RAM proxy (JPEG frames) for smooth playback
         self._proxy = None
 
@@ -172,10 +158,6 @@ class DigitalVCRApp:
         try:
             if self._live_cap is not None:
                 self._live_cap.release()
-        except Exception:
-            pass
-        try:
-            self._stop_live_audio()
         except Exception:
             pass
         try:
@@ -208,9 +190,6 @@ class DigitalVCRApp:
                 elif kind == "status_edit":
                     if hasattr(self, "edit_status"):
                         self.edit_status.set(payload)
-                elif kind == "status_live":
-                    if hasattr(self, "live_status"):
-                        self.live_status.set(payload)
                 elif kind == "status_play":
                     self.play_status.set(payload)
                 elif kind == "preview_rec":
@@ -242,7 +221,6 @@ class DigitalVCRApp:
             self._cached_rec_def = r
             self._cached_pb_def = p
             self._cached_ap_def = ap
-            self._cached_ar_def = self._current_audio_record_defects()
 
             try:
                 self._cached_live_downscale_width = int(getattr(self, "var_live_downscale_width").get())
@@ -250,14 +228,6 @@ class DigitalVCRApp:
                 pass
             try:
                 self._cached_live_tape_mode = str(getattr(self, "live_tape_mode_var").get())
-            except Exception:
-                pass
-            try:
-                self._cached_live_audio_enabled = bool(getattr(self, "live_audio_enable_var").get())
-            except Exception:
-                pass
-            try:
-                self._cached_live_audio_device = str(getattr(self, "live_audio_dev_var").get())
             except Exception:
                 pass
         except Exception:
@@ -296,12 +266,15 @@ class DigitalVCRApp:
         nb.pack(fill="both", expand=True)
         self.tab_rec = ttk.Frame(nb)
         self.tab_play = ttk.Frame(nb)
+        self.tab_vhs = ttk.Frame(nb)
         self.tab_live = ttk.Frame(nb)
         nb.add(self.tab_rec, text="Recorder")
         nb.add(self.tab_play, text="Player")
+        nb.add(self.tab_vhs, text="VHS Tape")
         nb.add(self.tab_live, text="Live")
         self._build_recorder_tab()
         self._build_player_tab()
+        self._build_vhs_tab()
         self._build_live_tab()
 
     def _slider(self, parent, label, name, frm, to, key: str):
@@ -496,11 +469,26 @@ class DigitalVCRApp:
         self.down_w = tk.IntVar(value=self.rec_opts.downscale_width)
         ttk.Scale(left, from_=200, to=720, variable=self.down_w, orient="horizontal").pack(anchor="w", fill="x")
 
+        ttk.Label(left, text="Field sampling").pack(anchor="w", pady=(8,0))
+        self.sampling_var = tk.StringVar(value=getattr(self.rec_opts, "field_sampling", "progressive"))
+        ttk.Combobox(left, values=["progressive","interlaced"], textvariable=self.sampling_var, width=16, state="readonly").pack(anchor="w")
+
+        ttk.Label(left, text="Encode threads (0=auto)").pack(anchor="w", pady=(8,0))
+        self.encode_threads_var = tk.IntVar(value=int(getattr(self.rec_opts, 'encode_threads', 0)))
+        rowt = ttk.Frame(left); rowt.pack(anchor="w", fill="x", pady=4)
+        ttk.Spinbox(rowt, from_=0, to=16, textvariable=self.encode_threads_var, width=6).pack(side="left")
+        ttk.Label(rowt, text="  (More threads = faster encode; uses CPU)").pack(side="left")
+
+        # Real RF modulation (FM+AM carrier round-trip)
+        self.real_rf_var = tk.BooleanVar(value=bool(getattr(self.rec_def, 'real_rf_modulation', False)))
+        ttk.Checkbutton(left, text="Real RF modulation (FM+AM)", variable=self.real_rf_var).pack(anchor="w", pady=4)
+
         ttk.Label(left, text="Tape mode (baked quality)").pack(anchor="w", pady=(8,0))
         self.rec_mode = tk.StringVar(value=self.rec_def.tape_mode)
         ttk.Combobox(left, values=["SP","LP","EP"], textvariable=self.rec_mode, width=8, state="readonly").pack(anchor="w")
 
         self._slider(left, "Luma bandwidth", "luma_bw", 0.35, 1.0, key="rec")
+        self._slider(left, "Chroma bandwidth", "chroma_bw", 0.20, 1.0, key="rec")
         self._slider(left, "Record blur", "record_blur", 0.0, 1.0, key="rec")
         self._slider(left, "Record jitter", "record_jitter", 0.0, 1.0, key="rec")
         self._slider(left, "Record RF noise", "record_rf_noise", 0.0, 0.15, key="rec")
@@ -617,11 +605,41 @@ class DigitalVCRApp:
 
     def _sync_rec_def(self):
         self.rec_def.tape_mode = self.rec_mode.get()
-        for k in ["luma_bw","record_blur","record_jitter","record_rf_noise","record_dropouts"]:
+        for k in ["luma_bw","chroma_bw","record_blur","record_jitter","record_rf_noise","record_dropouts"]:
             setattr(self.rec_def, k, float(getattr(self, f"var_rec_{k}").get()))
+        try:
+            self.rec_def.real_rf_modulation = bool(self.real_rf_var.get())
+        except Exception:
+            pass
+
+        # RF parameters (from VHS tab sliders, if available)
+        for k, default in [
+            ("rf_fm_depth", 1.0),
+            ("rf_am_depth", 0.25),
+            ("rf_phase_noise", 0.10),
+            ("rf_carrier_noise", 0.20),
+            ("rf_nonlinearity", 0.25),
+            ("rf_chroma_fc_frac", 0.12),
+            ("rf_chroma_lpf", 0.35),
+        ]:
+            try:
+                var = getattr(self, f"var_rec_{k}")
+                setattr(self.rec_def, k, float(var.get()))
+            except Exception:
+                # keep prior value/default
+                if not hasattr(self.rec_def, k):
+                    setattr(self.rec_def, k, float(default))
         self.rec_opts.downscale_width = int(self.down_w.get())
         self.rec_opts.enforce_real_time = bool(self.rt_var.get())
         self.rec_opts.extract_audio = bool(self.audio_extract_var.get())
+        try:
+            self.rec_opts.encode_threads = int(getattr(self, "encode_threads_var").get())
+        except Exception:
+            pass
+        try:
+            self.rec_opts.field_sampling = str(self.sampling_var.get())
+        except Exception:
+            pass
         self.ar_def.wow = float(getattr(self, "var_ar_wow").get())
         self.ar_def.hiss = float(getattr(self, "var_ar_hiss").get())
         self.ar_def.dropouts = float(getattr(self, "var_ar_dropouts").get())
@@ -665,7 +683,8 @@ class DigitalVCRApp:
             # Auto-save if we have a bundle folder
             if bundle and bool(self.autosave_var.get()):
                 try:
-                    settings = settings_to_dict(self.rec_def, self.pb_def, self.ar_def, self.ap_def)
+                    rec_def, pb_def, ap_def = self._sync_edit_defects()
+                    settings = settings_to_dict(rec_def, pb_def, self.ar_def, ap_def)
                     save_bundle(bundle, tape, settings)
                     msg += " | Auto-saved bundle"
                 except Exception as e:
@@ -794,10 +813,19 @@ class DigitalVCRApp:
         rec = RecordDefects(
             tape_mode=mode,
             luma_bw=_v("var_rec_luma_bw", r0.luma_bw),
+            chroma_bw=_v("var_rec_chroma_bw", getattr(r0, "chroma_bw", 1.0)),
             record_blur=_v("var_rec_record_blur", r0.record_blur),
             record_jitter=_v("var_rec_record_jitter", r0.record_jitter),
             record_rf_noise=_v("var_rec_record_rf_noise", r0.record_rf_noise),
             record_dropouts=_v("var_rec_record_dropouts", r0.record_dropouts),
+            real_rf_modulation=bool(getattr(self, 'real_rf_var', tk.BooleanVar(value=bool(getattr(r0,'real_rf_modulation',False)))).get()),
+            rf_fm_depth=_v("var_rec_rf_fm_depth", getattr(r0, "rf_fm_depth", 1.0)),
+            rf_am_depth=_v("var_rec_rf_am_depth", getattr(r0, "rf_am_depth", 0.25)),
+            rf_phase_noise=_v("var_rec_rf_phase_noise", getattr(r0, "rf_phase_noise", 0.10)),
+            rf_carrier_noise=_v("var_rec_rf_carrier_noise", getattr(r0, "rf_carrier_noise", 0.20)),
+            rf_nonlinearity=_v("var_rec_rf_nonlinearity", getattr(r0, "rf_nonlinearity", 0.25)),
+            rf_chroma_fc_frac=_v("var_rec_rf_chroma_fc_frac", getattr(r0, "rf_chroma_fc_frac", 0.12)),
+            rf_chroma_lpf=_v("var_rec_rf_chroma_lpf", getattr(r0, "rf_chroma_lpf", 0.35)),
         )
 
         try:
@@ -851,6 +879,13 @@ class DigitalVCRApp:
             frame_jitter_freq=_v("var_pb_frame_jitter_freq", getattr(pb0, "frame_jitter_freq", 0.65)),
             scanline_strength=_v("var_pb_scanline_strength", getattr(pb0, "scanline_strength", 0.0)),
             scanline_soften=_v("var_pb_scanline_soften", pb0.scanline_soften),
+            luma_chroma_bleed=_v("var_pb_luma_chroma_bleed", getattr(pb0, "luma_chroma_bleed", 0.0)),
+            rf_playback_model=bool(getattr(self, 'rf_play_var', tk.BooleanVar(value=bool(getattr(pb0,'rf_playback_model',False)))).get()),
+            rf_playback_fm_depth=_v("var_pb_rf_playback_fm_depth", getattr(pb0, "rf_playback_fm_depth", 1.0)),
+            rf_playback_am_depth=_v("var_pb_rf_playback_am_depth", getattr(pb0, "rf_playback_am_depth", 0.18)),
+            rf_playback_phase_noise=_v("var_pb_rf_playback_phase_noise", getattr(pb0, "rf_playback_phase_noise", 0.12)),
+            rf_playback_carrier_noise=_v("var_pb_rf_playback_carrier_noise", getattr(pb0, "rf_playback_carrier_noise", 0.20)),
+            rf_playback_nonlinearity=_v("var_pb_rf_playback_nonlinearity", getattr(pb0, "rf_playback_nonlinearity", 0.20)),
         )
     
         ap0 = self.ap_def
@@ -983,20 +1018,6 @@ class DigitalVCRApp:
         ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
         ttk.Label(left, text="Live controls (audio record)").pack(anchor="w")
 
-        audio_row = ttk.Frame(left)
-        audio_row.pack(anchor="w", fill="x", pady=(2, 0))
-        self.live_audio_enable_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(audio_row, text="Enable live audio capture", variable=self.live_audio_enable_var).pack(anchor="w")
-
-        ttk.Label(left, text="Audio input device").pack(anchor="w")
-        audio_dev_row = ttk.Frame(left)
-        audio_dev_row.pack(anchor="w", fill="x", pady=(2, 4))
-        self.live_audio_dev_var = tk.StringVar(value="Default")
-        self.live_audio_combo = ttk.Combobox(audio_dev_row, textvariable=self.live_audio_dev_var, width=28, state="readonly")
-        self.live_audio_combo.pack(side="left", padx=(0, 6))
-        ttk.Button(audio_dev_row, text="Refresh", command=self._refresh_audio_devices).pack(side="left")
-        self._refresh_audio_devices()
-
         # Audio record-side sliders
         self._slider(left, "Audio wow/flutter", "wow", 0.0, 1.0, key="ar")
         self._slider(left, "Audio hiss", "hiss", 0.0, 1.0, key="ar")
@@ -1101,45 +1122,6 @@ class DigitalVCRApp:
             pass
         self.live_cam_combo.bind("<<ComboboxSelected>>", lambda _e: self.live_cam_var.set(int(self.live_cam_combo.get())))
 
-    def _refresh_audio_devices(self):
-        sd = _get_sounddevice_module()
-        if sd is None:
-            try:
-                self.live_audio_combo["values"] = ["(sounddevice not installed)"]
-                self.live_audio_combo.set("(sounddevice not installed)")
-                self.live_audio_combo.config(state="disabled")
-            except Exception:
-                pass
-            return
-
-        inputs = []
-        try:
-            devices = sd.query_devices()
-        except Exception:
-            devices = []
-        for idx, dev in enumerate(devices):
-            try:
-                if int(dev.get("max_input_channels", 0)) > 0:
-                    name = str(dev.get("name", f"Input {idx}"))
-                    inputs.append((idx, name))
-            except Exception:
-                continue
-
-        values = ["Default"]
-        for idx, name in inputs:
-            values.append(f"{idx}: {name}")
-        self._live_audio_devices = [None] + [idx for idx, _ in inputs]
-
-        try:
-            self.live_audio_combo.config(state="readonly")
-            self.live_audio_combo["values"] = values
-            cur = str(self.live_audio_dev_var.get()) if hasattr(self, "live_audio_dev_var") else "Default"
-            if cur not in values:
-                cur = "Default"
-            self.live_audio_dev_var.set(cur)
-        except Exception:
-            pass
-
     def _toggle_live(self):
         try:
             on = bool(self.live_toggle_var.get())
@@ -1157,7 +1139,6 @@ class DigitalVCRApp:
                 self.live_status.set("Live mode: off")
             except Exception:
                 pass
-            self._stop_live_audio()
 
     def _toggle_live_overlay(self):
         try:
@@ -1222,119 +1203,6 @@ class DigitalVCRApp:
             except Exception:
                 pass
 
-    def _stop_live_audio(self):
-        stream = getattr(self, "_live_audio_stream", None)
-        if stream is not None:
-            try:
-                stream.stop()
-            except Exception:
-                pass
-            try:
-                stream.close()
-            except Exception:
-                pass
-        self._live_audio_stream = None
-
-    def _update_live_audio_anchor(self, base_tracks: int):
-        with self.lock:
-            self._live_audio_anchor_time = time.perf_counter()
-            self._live_audio_anchor_track = float(base_tracks)
-
-    def _write_live_audio_block(self, samples: np.ndarray, sr: int, anchor_time: float, anchor_track: float):
-        if samples is None or samples.size == 0:
-            return
-        with self.lock:
-            tape = getattr(self, "_live_tape", None)
-            if tape is None:
-                return
-            pcm = tape.audio.pcm16
-            if pcm is None or pcm.size == 0:
-                return
-            total = pcm.size
-
-        now = time.perf_counter()
-        block_start_time = now - (samples.size / float(sr))
-        track_start = anchor_track + (block_start_time - anchor_time) * 60.0
-        sample_start = int((track_start / 60.0) * sr)
-        sample_start = sample_start % total
-
-        try:
-            ar_def = getattr(self, "_cached_ar_def", self.ar_def)
-            samples = apply_audio_record_defects(
-                samples.astype(np.int16, copy=False),
-                sr,
-                wow=float(getattr(ar_def, "wow", 0.0)),
-                hiss=float(getattr(ar_def, "hiss", 0.0)),
-                dropouts=float(getattr(ar_def, "dropouts", 0.0)),
-                compression=float(getattr(ar_def, "compression", 0.55)),
-            )
-        except Exception:
-            pass
-
-        end = sample_start + samples.size
-        with self.lock:
-            if end <= total:
-                pcm[sample_start:end] = samples
-            else:
-                first = total - sample_start
-                pcm[sample_start:total] = samples[:first]
-                remain = samples.size - first
-                if remain > 0:
-                    pcm[0:remain] = samples[first:first + remain]
-
-    def _start_live_audio(self):
-        sd = _get_sounddevice_module()
-        if sd is None:
-            self._q("status_live", "Live audio: sounddevice not available.")
-            return
-
-        tape = getattr(self, "_live_tape", None)
-        if tape is None:
-            return
-
-        sr = int(getattr(tape.audio, "sample_rate", 44100) or 44100)
-        tape_len_s = float(tape.cart.length_tracks) / 60.0
-        need_n = int(tape_len_s * sr)
-        if tape.audio.pcm16 is None or tape.audio.pcm16.size != need_n:
-            tape.audio.sample_rate = sr
-            tape.audio.pcm16 = np.zeros((need_n,), dtype=np.int16)
-
-        device = None
-        try:
-            sel = str(getattr(self, "_cached_live_audio_device", "Default"))
-            if sel and sel != "Default":
-                device = int(sel.split(":", 1)[0])
-        except Exception:
-            device = None
-
-        def callback(indata, frames, _time_info, status):
-            if status:
-                self._q("status_live", f"Live audio warning: {status}")
-            try:
-                samples = indata[:, 0].copy()
-            except Exception:
-                return
-            with self.lock:
-                anchor_time = float(getattr(self, "_live_audio_anchor_time", 0.0))
-                anchor_track = float(getattr(self, "_live_audio_anchor_track", 0.0))
-            if anchor_time <= 0.0:
-                return
-            self._write_live_audio_block(samples, sr, anchor_time, anchor_track)
-
-        try:
-            stream = sd.InputStream(
-                samplerate=sr,
-                channels=1,
-                dtype="int16",
-                device=device,
-                callback=callback,
-            )
-            stream.start()
-            self._live_audio_stream = stream
-        except Exception as exc:
-            self._live_audio_stream = None
-            self._q("status_live", f"Live audio: failed to start ({exc})")
-
     def _live_worker_loop(self):
         # Worker thread: capture camera -> encode to tape tracks -> decode via player -> store latest frame
         t_last = time.perf_counter()
@@ -1342,8 +1210,6 @@ class DigitalVCRApp:
         while not self._live_worker_stop.is_set():
             try:
                 if not getattr(self, "_live_on", False):
-                    if self._live_audio_stream is not None:
-                        self._stop_live_audio()
                     time.sleep(0.05)
                     continue
 
@@ -1378,15 +1244,6 @@ class DigitalVCRApp:
                     self.live_player.insert()
                     self.live_player.play()
                     self._live_seg_id = int(time.time()*1000) & 0x7fffffff
-                    self._update_live_audio_anchor(0)
-                    try:
-                        sr = int(getattr(self._live_tape.audio, "sample_rate", 44100) or 44100)
-                        tape_len_s = float(self._live_tape.cart.length_tracks) / 60.0
-                        need_n = int(tape_len_s * sr)
-                        self._live_tape.audio.sample_rate = sr
-                        self._live_tape.audio.pcm16 = np.zeros((need_n,), dtype=np.int16)
-                    except Exception:
-                        pass
 
                     self._q("status_live", f"Live: camera {cam_idx} opened")
                     t_last = time.perf_counter()
@@ -1428,13 +1285,6 @@ class DigitalVCRApp:
                     self.live_player.state._last_pos_tracks = 0.0
                     self.live_player._cache.clear()
                     base = 0
-                    self._update_live_audio_anchor(base)
-
-                audio_enabled = bool(getattr(self, "_cached_live_audio_enabled", False))
-                if audio_enabled and self._live_audio_stream is None:
-                    self._start_live_audio()
-                elif (not audio_enabled) and self._live_audio_stream is not None:
-                    self._stop_live_audio()
 
                 # Capture frame (drop buffered frames if we fall behind to avoid 'fast old frames')
                 try:
@@ -1505,23 +1355,82 @@ class DigitalVCRApp:
                 if frame.shape[0] % 2 == 1:
                     frame = frame[:-1, :, :]
 
-                f0 = frame[0::2].copy()
-                f1 = frame[1::2].copy()
+                f0, f1 = sample_fields_from_frame(frame, getattr(opts, 'field_sampling', 'interlaced'))
 
                 f0b = apply_record_defects_to_field(f0, rec_def)
                 f1b = apply_record_defects_to_field(f1, rec_def)
 
-                y0, c0, meta0 = encode_field_bgr(f0b, sample_rate=opts.sample_rate,
-                                                 chroma_subsample=opts.chroma_subsample,
-                                                 luma_bw=rec_def.luma_bw)
-                y1, c1, meta1 = encode_field_bgr(f1b, sample_rate=opts.sample_rate,
-                                                 chroma_subsample=opts.chroma_subsample,
-                                                 luma_bw=rec_def.luma_bw)
+                y0, c0, meta0 = encode_field_bgr(
+                    f0b,
+                    sample_rate=opts.sample_rate,
+                    chroma_subsample=opts.chroma_subsample,
+                    luma_bw=rec_def.luma_bw,
+                    chroma_bw=float(getattr(rec_def, 'chroma_bw', 1.0)),
+                )
+                y1, c1, meta1 = encode_field_bgr(
+                    f1b,
+                    sample_rate=opts.sample_rate,
+                    chroma_subsample=opts.chroma_subsample,
+                    luma_bw=rec_def.luma_bw,
+                    chroma_bw=float(getattr(rec_def, 'chroma_bw', 1.0)),
+                )
 
                 y0 = apply_rf_defects_y_dphi_u8(y0, rec_def.record_rf_noise, rec_def.record_dropouts, rec_def.tape_mode)
                 c0 = apply_rf_defects_chroma_u8(c0, rec_def.record_rf_noise, rec_def.record_dropouts, rec_def.tape_mode)
                 y1 = apply_rf_defects_y_dphi_u8(y1, rec_def.record_rf_noise, rec_def.record_dropouts, rec_def.tape_mode)
                 c1 = apply_rf_defects_chroma_u8(c1, rec_def.record_rf_noise, rec_def.record_dropouts, rec_def.tape_mode)
+
+                if bool(getattr(rec_def, 'real_rf_modulation', False)):
+                    try:
+                        y0 = rf_roundtrip_luma_dphi_u8(
+                            y0, meta0,
+                            noise=float(rec_def.record_rf_noise),
+                            dropouts=float(rec_def.record_dropouts),
+                            mode=str(rec_def.tape_mode),
+                            fm_depth=float(getattr(rec_def, 'rf_fm_depth', 1.0)),
+                            am_depth=float(getattr(rec_def, 'rf_am_depth', 0.25)),
+                            nonlinearity=float(getattr(rec_def, 'rf_nonlinearity', 0.25)),
+                            carrier_noise=float(getattr(rec_def, 'rf_carrier_noise', 0.20)),
+                            phase_noise=float(getattr(rec_def, 'rf_phase_noise', 0.10)),
+                        )
+                        c0 = rf_roundtrip_chroma_u8(
+                            c0, meta0,
+                            noise=float(rec_def.record_rf_noise),
+                            dropouts=float(rec_def.record_dropouts),
+                            mode=str(rec_def.tape_mode),
+                            fc_frac=float(getattr(rec_def, 'rf_chroma_fc_frac', 0.12)),
+                            lpf_strength=float(getattr(rec_def, 'rf_chroma_lpf', 0.35)),
+                            am_depth=float(getattr(rec_def, 'rf_am_depth', 0.25)),
+                            nonlinearity=float(getattr(rec_def, 'rf_nonlinearity', 0.25)),
+                            carrier_noise=float(getattr(rec_def, 'rf_carrier_noise', 0.20)),
+                            phase_noise=float(getattr(rec_def, 'rf_phase_noise', 0.10)),
+                        )
+
+                        y1 = rf_roundtrip_luma_dphi_u8(
+                            y1, meta1,
+                            noise=float(rec_def.record_rf_noise),
+                            dropouts=float(rec_def.record_dropouts),
+                            mode=str(rec_def.tape_mode),
+                            fm_depth=float(getattr(rec_def, 'rf_fm_depth', 1.0)),
+                            am_depth=float(getattr(rec_def, 'rf_am_depth', 0.25)),
+                            nonlinearity=float(getattr(rec_def, 'rf_nonlinearity', 0.25)),
+                            carrier_noise=float(getattr(rec_def, 'rf_carrier_noise', 0.20)),
+                            phase_noise=float(getattr(rec_def, 'rf_phase_noise', 0.10)),
+                        )
+                        c1 = rf_roundtrip_chroma_u8(
+                            c1, meta1,
+                            noise=float(rec_def.record_rf_noise),
+                            dropouts=float(rec_def.record_dropouts),
+                            mode=str(rec_def.tape_mode),
+                            fc_frac=float(getattr(rec_def, 'rf_chroma_fc_frac', 0.12)),
+                            lpf_strength=float(getattr(rec_def, 'rf_chroma_lpf', 0.35)),
+                            am_depth=float(getattr(rec_def, 'rf_am_depth', 0.25)),
+                            nonlinearity=float(getattr(rec_def, 'rf_nonlinearity', 0.25)),
+                            carrier_noise=float(getattr(rec_def, 'rf_carrier_noise', 0.20)),
+                            phase_noise=float(getattr(rec_def, 'rf_phase_noise', 0.10)),
+                        )
+                    except Exception:
+                        pass
 
                 sync_u8, vjit_u8 = self.recorder._control_track_values(rec_def)
                 dt_field = 1.0/60.0
@@ -1535,6 +1444,10 @@ class DigitalVCRApp:
                         "ctl_vjit_u8": int(vjit_u8),
                         "tape_mode": str(rec_def.tape_mode),
                         "field": int(field_i),
+                        "real_rf_modulation": bool(getattr(rec_def, 'real_rf_modulation', False)),
+                        "rf_fm_depth": float(getattr(rec_def, 'rf_fm_depth', 1.0)),
+                        "rf_chroma_fc_frac": float(getattr(rec_def, 'rf_chroma_fc_frac', 0.12)),
+                        "rf_chroma_lpf": float(getattr(rec_def, 'rf_chroma_lpf', 0.35)),
                     })
                     tape.cart.set(idx, TapeTrack(y_dphi8=yy, c_u8=cc, meta=meta))
 
@@ -1695,6 +1608,203 @@ class DigitalVCRApp:
 
         self.play_canvas = tk.Label(right, text="Player output (video + audio)", background="#111", foreground="#ddd")
         self.play_canvas.pack(fill="both", expand=True)
+
+
+
+    # -------- Presets (settings save/load) --------
+    def _preset_default_dir(self) -> Path:
+        d = Path.cwd() / "presets"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return d
+
+    def _collect_current_settings_dict(self) -> dict:
+        # Sync record-side options (downscale, audio, rf toggle, etc.)
+        try:
+            self._sync_rec_def()
+        except Exception:
+            pass
+        # Build fresh defect objects from UI (safe snapshot)
+        rec_def, pb_def, ap_def = self._sync_edit_defects()
+        settings = settings_to_dict(rec_def, pb_def, self.ar_def, ap_def)
+        rec_opts = {
+            "downscale_width": int(getattr(self, 'down_w').get()) if hasattr(self, 'down_w') else int(getattr(self.rec_opts, 'downscale_width', 360)),
+            "enforce_real_time": bool(getattr(self, 'rt_var').get()) if hasattr(self, 'rt_var') else bool(getattr(self.rec_opts, 'enforce_real_time', True)),
+            "extract_audio": bool(getattr(self, 'audio_extract_var').get()) if hasattr(self, 'audio_extract_var') else bool(getattr(self.rec_opts, 'extract_audio', True)),
+            "field_sampling": str(getattr(self, 'sampling_var').get()) if hasattr(self, 'sampling_var') else str(getattr(self.rec_opts, 'field_sampling', 'progressive')),
+            "encode_threads": int(getattr(self, 'encode_threads_var').get()) if hasattr(self, 'encode_threads_var') else int(getattr(self.rec_opts, 'encode_threads', 0)),
+            "use_src_timestamps": bool(getattr(self.rec_opts, 'use_src_timestamps', True)),
+        }
+        return {
+            "version": "digital_vcr_preset_v1",
+            "created": datetime.datetime.now().isoformat(timespec='seconds'),
+            "settings": settings,
+            "record_options": rec_opts,
+        }
+
+    def _apply_settings_dict_to_ui(self, data: dict) -> None:
+        # Accept either full preset JSON or a raw settings dict.
+        settings = data.get('settings', data)
+        rec_def, pb_def, ar_def, ap_def = settings_from_dict(settings)
+
+        def _set(name: str, value):
+            try:
+                var = getattr(self, name)
+                var.set(value)
+            except Exception:
+                pass
+
+        # Recorder tab
+        _set('rec_mode', getattr(rec_def, 'tape_mode', 'SP'))
+        for k in ['luma_bw','chroma_bw','record_blur','record_jitter','record_rf_noise','record_dropouts',
+                  'rf_fm_depth','rf_am_depth','rf_phase_noise','rf_carrier_noise','rf_nonlinearity','rf_chroma_fc_frac','rf_chroma_lpf']:
+            try:
+                v = float(getattr(rec_def, k))
+                _set(f'var_rec_{k}', v)
+            except Exception:
+                pass
+        _set('real_rf_var', bool(getattr(rec_def, 'real_rf_modulation', False)))
+
+        # Audio record
+        for k in ['wow','hiss','dropouts','compression']:
+            try:
+                _set(f'var_ar_{k}', float(getattr(ar_def, k)))
+            except Exception:
+                pass
+
+        # Player tab
+        _set('pb_aspect_play', getattr(pb_def, 'aspect_display', '4:3'))
+        _set('comp_play_var', bool(getattr(pb_def, 'composite_view', False)))
+        for k, v in pb_def.__dict__.items():
+            if k in ('aspect_display','composite_view'):
+                continue
+            # booleans
+            if k == 'rf_playback_model':
+                _set('rf_play_var', bool(v))
+                continue
+            # floats
+            if isinstance(v, (int, float)):
+                _set(f'var_pb_{k}', float(v))
+
+        # Audio playback
+        for k in ['hiss','pops']:
+            try:
+                _set(f'var_ap_{k}', float(getattr(ap_def, k)))
+            except Exception:
+                pass
+
+        # Record options (if present)
+        ro = data.get('record_options', {}) if isinstance(data, dict) else {}
+        if isinstance(ro, dict):
+            if 'downscale_width' in ro:
+                _set('down_w', int(ro['downscale_width']))
+            if 'enforce_real_time' in ro:
+                _set('rt_var', bool(ro['enforce_real_time']))
+            if 'extract_audio' in ro:
+                _set('audio_extract_var', bool(ro['extract_audio']))
+            if 'field_sampling' in ro:
+                _set('sampling_var', str(ro['field_sampling']))
+            if 'encode_threads' in ro:
+                _set('encode_threads_var', int(ro['encode_threads']))
+
+        # Refresh cached dataclasses used by worker threads
+        try:
+            self._cache_defects_mainthread()
+        except Exception:
+            pass
+
+    def _save_preset(self):
+        d = self._preset_default_dir()
+        pth = filedialog.asksaveasfilename(
+            title='Save preset',
+            initialdir=str(d),
+            defaultextension='.json',
+            filetypes=[('Preset JSON','*.json')]
+        )
+        if not pth:
+            return
+        data = self._collect_current_settings_dict()
+        try:
+            Path(pth).write_text(json.dumps(data, indent=2), encoding='utf-8')
+            messagebox.showinfo('Preset saved', f'Saved preset\n{pth}')
+
+        
+        except Exception as e:
+            messagebox.showerror('Save failed', str(e))
+
+    def _load_preset(self):
+        d = self._preset_default_dir()
+        pth = filedialog.askopenfilename(
+            title='Load preset',
+            initialdir=str(d),
+            filetypes=[('Preset JSON','*.json'), ('All','*.*')]
+        )
+        if not pth:
+            return
+        try:
+            raw = Path(pth).read_text(encoding='utf-8')
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError('Preset file is not a JSON object')
+            self._apply_settings_dict_to_ui(data)
+            messagebox.showinfo('Preset loaded', f'Loaded preset\n{pth}')
+        except Exception as e:
+            messagebox.showerror('Load failed', str(e))
+
+    def _build_vhs_tab(self):
+        """Advanced RF / tape modelling controls.
+
+        This tab is intentionally separated so Recorder/Player tabs stay usable.
+        """
+        left_sf = VScrollFrame(self.tab_vhs, width=390)
+        right = ttk.Frame(self.tab_vhs)
+        left_sf.pack(side="left", fill="y", padx=10, pady=10)
+        right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+        left = left_sf.inner
+
+        ttk.Label(left, text="RF / Tape model (advanced)").pack(anchor="w")
+        ttk.Label(left, text="These parameters affect how FM/AM behaves before decode.").pack(anchor="w", pady=(0, 8))
+
+        rowp = ttk.Frame(left); rowp.pack(anchor="w", fill="x", pady=(0,6))
+        ttk.Button(rowp, text="Save preset…", command=self._save_preset).pack(side="left")
+        ttk.Button(rowp, text="Load preset…", command=self._load_preset).pack(side="left", padx=6)
+
+        # Recorder-side toggle is also on the Recorder tab; reuse the same tk var.
+        if not hasattr(self, 'real_rf_var'):
+            self.real_rf_var = tk.BooleanVar(value=bool(getattr(self.rec_def, 'real_rf_modulation', False)))
+        ttk.Checkbutton(left, text="Enable Real RF modulation (FM+AM round-trip)", variable=self.real_rf_var).pack(anchor="w", pady=4)
+
+        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Label(left, text="Record-side RF parameters").pack(anchor="w")
+        self._slider(left, "RF FM depth (luma deviation)", "rf_fm_depth", 0.50, 1.50, key="rec")
+        self._slider(left, "RF AM depth", "rf_am_depth", 0.0, 1.0, key="rec")
+        self._slider(left, "RF phase noise", "rf_phase_noise", 0.0, 1.0, key="rec")
+        self._slider(left, "RF carrier noise", "rf_carrier_noise", 0.0, 1.0, key="rec")
+        self._slider(left, "RF nonlinearity", "rf_nonlinearity", 0.0, 1.0, key="rec")
+        self._slider(left, "Chroma carrier (fc fraction)", "rf_chroma_fc_frac", 0.02, 0.49, key="rec")
+        self._slider(left, "Chroma demod low-pass", "rf_chroma_lpf", 0.0, 1.0, key="rec")
+
+        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Label(left, text="Playback-side RF / recombination").pack(anchor="w")
+
+        if not hasattr(self, 'rf_play_var'):
+            self.rf_play_var = tk.BooleanVar(value=bool(getattr(self.pb_def, 'rf_playback_model', False)))
+        ttk.Checkbutton(left, text="Enable RF playback model", variable=self.rf_play_var).pack(anchor="w", pady=4)
+
+        self._slider(left, "Luma/Chroma bleed", "luma_chroma_bleed", 0.0, 1.0, key="pb")
+        self._slider(left, "RF FM depth (playback)", "rf_playback_fm_depth", 0.50, 1.50, key="pb")
+        self._slider(left, "RF AM depth (playback)", "rf_playback_am_depth", 0.0, 1.0, key="pb")
+        self._slider(left, "RF phase noise (playback)", "rf_playback_phase_noise", 0.0, 1.0, key="pb")
+        self._slider(left, "RF carrier noise (playback)", "rf_playback_carrier_noise", 0.0, 1.0, key="pb")
+        self._slider(left, "RF nonlinearity (playback)", "rf_playback_nonlinearity", 0.0, 1.0, key="pb")
+
+        msg = (
+            "Tip: If you want 'clean' separation, keep Luma/Chroma bleed at 0.\n"
+            "Then raise it slowly to introduce controlled cross-talk."
+        )
+        ttk.Label(right, text=msg, justify="left", wraplength=420).pack(anchor="nw")
 
     def _player_insert(self):
         with self.lock:
@@ -1943,3 +2053,4 @@ class DigitalVCRApp:
             compression=_g("var_ar_compression", getattr(self.ar_def, "compression", 0.55)),
 
         )
+

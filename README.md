@@ -17,11 +17,6 @@ pip install -r requirements.txt
 python main.py
 ```
 
-### Testing
-```bash
-python -m pytest
-```
-
 ### Where is my tape saved?
 - If you click **New tape bundle (creates folder now)**, the tape is created on disk immediately.
 - Recording updates the in-memory tape and then **auto-saves back into that same bundle** (if enabled).
@@ -71,3 +66,21 @@ python -m pytest
 - Removed Editor tab (Recorder + Player only).
 - Added Tracking artifacts + Variance sliders, and wired them into playback.
 - Snow + interference are more visible and respond smoothly to slider values.
+
+
+### Build Windows EXE with PyInstaller
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+pip install -r requirements-build.txt
+pyinstaller digital_vcr.spec
+```
+
+Build output:
+- `dist\DigitalVCR\DigitalVCR.exe` (onedir build, recommended)
+
+Notes:
+- The spec file collects OpenCV and `imageio-ffmpeg` runtime files automatically.
+- `winsound` audio playback is Windows-only and works in the packaged build.
+- If SmartScreen warns on first run, that is normal for an unsigned local EXE.
