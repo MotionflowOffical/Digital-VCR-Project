@@ -19,7 +19,7 @@ better **field pairing**, and improved handling for **progressive / variable-fra
 - **Windows built-in audio playback** plus MP4 export with optional audio mux.
 - **Backward-compatible bundle loading** for older `tape.npz` tapes.
 
-## What changed vs v6.13.1
+## What changed
 
 ### V6_13_8
 - Added a dedicated **CRT TV** tab with Consumer TV and Pro Monitor presets.
@@ -40,28 +40,6 @@ better **field pairing**, and improved handling for **progressive / variable-fra
 - Removed duplicated ffmpeg audio extraction during recording for faster record startup and lower CPU/disk load.
 - Fixed live-mode status updates and camera release behavior.
 
-### v6.13.6
-- Added a dedicated **VHS Tape** tab for advanced RF / tape modelling controls.
-- Added **real RF modulation** on record as an optional luma/chroma carrier round-trip:
-  - luma: FM-style carrier simulation
-  - chroma: color-under style subcarrier simulation
-  - channel effects include AM ripple, phase noise, carrier noise, nonlinearity, and dropouts
-- Added **RF playback model** controls so playback can also apply carrier-level degradation before decode.
-- Added **Luma/Chroma bleed** control for controlled cross-talk at recombination.
-- Added **chroma bandwidth** control during encoding so chroma softness can be tuned independently from luma.
-- Recorder now stores **frame pairing metadata** (`frame_base_track`, `field_in_frame`) so playback pairs fields correctly even if recording starts on an odd track index.
-- Player now uses that pairing metadata to avoid mismatched field weaving, reducing false combing/tearing and improving fine-detail readability.
-- Recording now defaults to **progressive field sampling** instead of simple even/odd weaving for progressive sources.
-- Recording can use **source timestamps** for variable-frame-rate inputs instead of relying only on a fixed FPS assumption.
-- Bundle format now prefers **split tape containers**:
-  - `tape_luma.npz`
-  - `tape_chroma.npz`
-- Bundle save/load now persists RF-related per-track metadata so RF settings survive round-trips through disk.
-- Embedded audio save/load now prefers compact **`audio_tape.npz`** storage, with fallback support retained.
-- Legacy bundles are still supported:
-  - older single-file `tape.npz` loads normally
-  - `audio.wav` remains a fallback when compact embedded audio is unavailable
-- RF control wiring and persistence were cleaned up so the new advanced controls are exposed and usable from the UI.
 
 ## Run
 
@@ -177,40 +155,6 @@ The loader still supports older bundle layouts, including:
 - Player audio uses **Windows built-in audio playback** when available.
 - Tape audio is stored compactly when possible and decoded back in memory on load.
 - Export can generate video-only or muxed video+audio outputs.
-
-## Changelog from earlier v6 builds
-
-### v6.4 fix
-- Editor Live Preview now works after load (fixed missing Audio Playback slider vars).
-- Live Preview jumps to first recorded track automatically.
-
-### v6.5
-- Tracking controls moved to the Player tab (final preview).
-- Player can export final MP4 (with optional audio mux).
-- Player can play tape audio.
-- Tape bundles embed audio on tape and keep `audio.wav` as a fallback.
-
-### v6.6.2
-- Fixed crash when exporting/saving when playback vars were not built yet.
-- Live Preview no longer silently stops due to missing tracking vars.
-
-### v6.6.4
-- Fixed Editor Live Preview freezing: worker threads no longer call Tk variable `.get()`.
-- Coalesced preview frames + bounded queue drain to prevent UI starvation.
-
-### v6.7
-- Reduced full-frame white flicker.
-- Snow model became sparser and less "fireworks"-like.
-- Added Sync bias + Servo recovery controls.
-- Audio storage became smaller / more encoded.
-- Audio playback improved with a Windows fallback.
-- Added optional RAM proxy builder for smoother playback.
-
-### v6.8
-- Audio playback switched to Windows built-in support.
-- UI simplified around Recorder + Player flow.
-- Added Tracking artifacts + Variance controls.
-- Snow + interference became more visible and smoother to tune.
 
 ## Project structure
 
