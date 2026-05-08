@@ -1,6 +1,6 @@
-# Digital VCR (v6.13.6)
+# Digital VCR (V6_13_8)
 
-A desktop VHS-style video recorder and playback simulator built with **Tkinter + OpenCV + NumPy**.
+A desktop VHS-style video recorder and playback simulator built with **CustomTkinter + OpenCV + NumPy**.
 It records source video into a custom tape format, plays it back with tracking/RF defects,
 and exports the result as MP4.
 
@@ -9,15 +9,36 @@ better **field pairing**, and improved handling for **progressive / variable-fra
 
 ## Highlights
 
-- **Recorder, Player, VHS Tape, and Live tabs** in one desktop app.
+- **Recorder, Player, VHS Tape, and Live pages** in one desktop app.
+- **Modern Studio Console UI** with left-sidebar navigation, dark gradients, and per-setting `?` hover help.
 - **Tape bundle workflow**: create, load, save, and keep working directly from a bundle folder.
 - **Threaded UI paths** for playback, scrubbing, preview, and bundle loading.
 - **Optional RF carrier round-trip model** for more analog-like luma/chroma degradation.
+- **Required-GPU CRT simulator** using ModernGL + GLFW for phosphor masks, beam shape, bloom, curvature, persistence, and export baking.
 - **Built-in live camera path** with fullscreen overlay output.
 - **Windows built-in audio playback** plus MP4 export with optional audio mux.
 - **Backward-compatible bundle loading** for older `tape.npz` tapes.
 
 ## What changed vs v6.13.1
+
+### V6_13_8
+- Added a dedicated **CRT TV** tab with Consumer TV and Pro Monitor presets.
+- Added a GPU CRT renderer built on **ModernGL + GLFW / OpenGL 3.3**.
+- CRT simulation can be enabled independently for Player preview, Live preview/overlay, direct OpenGL Player/Live windows, and MP4 exports.
+- CRT export bakes the display simulation into the rendered video only; tape tracks and bundle media remain unchanged.
+- Added simulated phosphor resolution controls so masks are rendered at a higher internal resolution before display/downsample.
+- Simulated phosphor masks, scanline beam profile, convergence, curvature, overscan, edge focus, bloom, halation, vignette, and phosphor decay.
+- Added CRT settings persistence in presets/bundles while keeping older settings files compatible.
+- Added GPU smoke/export tests for the CRT path.
+
+### V6_13_7
+- Rebuilt the desktop UI with **CustomTkinter**, left-sidebar navigation, a dark Studio Console palette, and gradient-backed app shell.
+- Added `?` hover help beside user-adjustable settings so ranges explain low/mid/high behavior, visual/audio/performance impact, and whether changes are baked or playback-only.
+- Refreshed the desktop UI with a professional dark theme and clearer playback controls.
+- Fixed unsafe worker-thread access to Tk variables during load, record, live capture, and proxy playback.
+- Added in-app tape audio preview and clearer playback audio status, so audio does not need to be exported just to check it.
+- Removed duplicated ffmpeg audio extraction during recording for faster record startup and lower CPU/disk load.
+- Fixed live-mode status updates and camera release behavior.
 
 ### v6.13.6
 - Added a dedicated **VHS Tape** tab for advanced RF / tape modelling controls.
@@ -51,6 +72,8 @@ pip install -r requirements.txt
 python main.py
 ```
 
+CRT implementation files live in `vcr/crt.py` and `vcr/crt_renderer.py`.
+
 ## Requirements
 
 - Python 3.10+
@@ -58,6 +81,9 @@ python main.py
 - OpenCV
 - Pillow
 - imageio-ffmpeg
+- CustomTkinter
+- ModernGL
+- GLFW
 
 Installed from `requirements.txt`:
 
@@ -66,9 +92,12 @@ numpy>=1.24
 opencv-python>=4.7
 Pillow>=10.0
 imageio-ffmpeg>=0.4.9
+customtkinter>=5.2.2
+moderngl>=5.12.0
+glfw>=2.10.0
 ```
 
-## Main tabs
+## Main sidebar pages
 
 ### Recorder
 Use this to:
@@ -98,6 +127,13 @@ Advanced modelling tab for:
   - chroma demod low-pass
 - enabling the **RF playback model**
 - adjusting playback-side RF behaviour and luma/chroma bleed
+
+### CRT TV
+GPU display simulation tab for:
+- enabling CRT output for Player, Live, direct OpenGL windows, and MP4 export
+- choosing Consumer TV or Pro Monitor presets
+- selecting aperture grille, slot mask, or shadow mask phosphors
+- tuning simulated phosphor render width, scanlines, beam sharpness, bloom, halation, curvature, overscan, convergence, vignette, and phosphor decay
 
 ### Live
 Use a live camera as the source path with:
@@ -201,4 +237,3 @@ vcr/
 tools/
 └── capture_screen.py
 ```
-

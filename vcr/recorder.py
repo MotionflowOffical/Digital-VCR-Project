@@ -240,12 +240,6 @@ class Recorder:
         self.last_error = None
         self.last_audio_error = None
 
-        # Audio extraction is handled below (src_audio) so we can overwrite only the recorded region.
-        if opts.extract_audio:
-            _pcm, err = extract_audio_mono_pcm16(path, sample_rate=int(tape.audio.sample_rate or 44100))
-            if _pcm is None and err:
-                self.last_audio_error = err
-
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
             self.last_error = f"Could not open video: {path}"
@@ -260,7 +254,11 @@ class Recorder:
         dt_tape = 1.0 / tape_fps
 
         # ---- Audio capture from source (ffmpeg) and overwrite into tape audio track ----
-        src_audio, _audio_err = extract_audio_mono_pcm16(path, sample_rate=int(tape.audio.sample_rate or 44100))
+        src_audio = None
+        if opts.extract_audio:
+            src_audio, _audio_err = extract_audio_mono_pcm16(path, sample_rate=int(tape.audio.sample_rate or 44100))
+            if src_audio is None and _audio_err:
+                self.last_audio_error = _audio_err
         sr = int(tape.audio.sample_rate or 44100)
         tape.audio.sample_rate = sr
 

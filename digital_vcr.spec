@@ -6,6 +6,10 @@ block_cipher = None
 hiddenimports = []
 hiddenimports += collect_submodules('vcr')
 hiddenimports += collect_submodules('PIL')
+hiddenimports += collect_submodules('customtkinter')
+hiddenimports += collect_submodules('moderngl')
+hiddenimports += collect_submodules('glcontext')
+hiddenimports += collect_submodules('glfw')
 hiddenimports += [
     'tkinter',
     'tkinter.ttk',
@@ -14,13 +18,19 @@ hiddenimports += [
     'cv2',
     'numpy',
     'imageio_ffmpeg',
+    'moderngl',
+    'glfw',
+    'glcontext',
 ]
 
 datas = []
 datas += collect_data_files('imageio_ffmpeg')
+datas += collect_data_files('customtkinter')
 
 binaries = []
 binaries += collect_dynamic_libs('cv2')
+binaries += collect_dynamic_libs('glfw')
+binaries += collect_dynamic_libs('glcontext')
 
 a = Analysis(
     ['main.py'],
