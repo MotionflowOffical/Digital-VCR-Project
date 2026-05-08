@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 # Digital VCR (V7_1)
+=======
+# Digital VCR (V7)
+>>>>>>> fc1237783e7f6deb587991a8ec47eab258c730a0
 
 A desktop VHS-style video recorder, live camera processor, CRT display simulator, and MP4 exporter built with CustomTkinter, OpenCV, NumPy, ModernGL, and GLFW.
 
@@ -15,6 +19,7 @@ V7_1 focuses on live-mode stability, simpler camera input selection, CRT thread 
 - Windows built-in audio playback plus MP4 export with optional audio mux.
 - Backward-compatible bundle loading for older tape bundle layouts.
 
+<<<<<<< HEAD
 ## V7_1 Updates
 
 - Simplified Live camera selection back to plain camera indexes such as `0`, `1`, and `2`.
@@ -27,6 +32,29 @@ V7_1 focuses on live-mode stability, simpler camera input selection, CRT thread 
 - CRT output remains isolated through the CRT renderer thread; no Live worker touches ModernGL or GLFW directly.
 - Removed the expensive per-pixel gradient redraw from the app shell to reduce resize, drag, and scroll lag.
 - Updated CRT and Live setting help text.
+=======
+## What changed
+
+### V6_13_8
+- Added a dedicated **CRT TV** tab with Consumer TV and Pro Monitor presets.
+- Added a GPU CRT renderer built on **ModernGL + GLFW / OpenGL 3.3**.
+- CRT simulation can be enabled independently for Player preview, Live preview/overlay, direct OpenGL Player/Live windows, and MP4 exports.
+- CRT export bakes the display simulation into the rendered video only; tape tracks and bundle media remain unchanged.
+- Added simulated phosphor resolution controls so masks are rendered at a higher internal resolution before display/downsample.
+- Simulated phosphor masks, scanline beam profile, convergence, curvature, overscan, edge focus, bloom, halation, vignette, and phosphor decay.
+- Added CRT settings persistence in presets/bundles while keeping older settings files compatible.
+- Added GPU smoke/export tests for the CRT path.
+
+### V6_13_7
+- Rebuilt the desktop UI with **CustomTkinter**, left-sidebar navigation, a dark Studio Console palette, and gradient-backed app shell.
+- Added `?` hover help beside user-adjustable settings so ranges explain low/mid/high behavior, visual/audio/performance impact, and whether changes are baked or playback-only.
+- Refreshed the desktop UI with a professional dark theme and clearer playback controls.
+- Fixed unsafe worker-thread access to Tk variables during load, record, live capture, and proxy playback.
+- Added in-app tape audio preview and clearer playback audio status, so audio does not need to be exported just to check it.
+- Removed duplicated ffmpeg audio extraction during recording for faster record startup and lower CPU/disk load.
+- Fixed live-mode status updates and camera release behavior.
+
+>>>>>>> fc1237783e7f6deb587991a8ec47eab258c730a0
 
 ## Run
 
@@ -115,7 +143,11 @@ The loader still supports older bundle layouts, including legacy single-file `ta
 - Tape audio is stored compactly when possible and decoded back in memory on load.
 - Export can generate video-only or muxed video+audio outputs.
 
+<<<<<<< HEAD
 ## Project Structure
+=======
+## Project structure
+>>>>>>> fc1237783e7f6deb587991a8ec47eab258c730a0
 
 ```text
 main.py
