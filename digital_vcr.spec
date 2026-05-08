@@ -1,4 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+
+import glfw
 from PyInstaller.utils.hooks import collect_submodules, collect_dynamic_libs, collect_data_files
 
 block_cipher = None
@@ -31,6 +34,12 @@ binaries = []
 binaries += collect_dynamic_libs('cv2')
 binaries += collect_dynamic_libs('glfw')
 binaries += collect_dynamic_libs('glcontext')
+glfw_dir = Path(glfw.__file__).parent
+for dll_name in ('glfw3.dll', 'msvcr120.dll'):
+    dll_path = glfw_dir / dll_name
+    if dll_path.exists():
+        binaries.append((str(dll_path), 'glfw'))
+        binaries.append((str(dll_path), '.'))
 
 a = Analysis(
     ['main.py'],

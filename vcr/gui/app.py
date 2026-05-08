@@ -35,7 +35,7 @@ from ..crt import (
 from ..crt_renderer import CRTFrameRenderer, CRTGPUUnavailable
 from ..modulation import decode_field_bgr
 
-APP_VERSION = "V6_13_8"
+APP_VERSION = "V7_1"
 
 DARK_BG = "#0b0f14"
 PANEL_BG = "#111821"
@@ -50,6 +50,140 @@ SIDEBAR_BG = "#0d131b"
 CARD_BG = "#121a24"
 CARD_BG_2 = "#182332"
 TOOLTIP_BG = "#101923"
+
+CAMERA_BACKENDS = (
+    ("DirectShow", cv2.CAP_DSHOW),
+    ("Media Foundation", cv2.CAP_MSMF),
+    ("Auto", cv2.CAP_ANY),
+)
+CAMERA_SCAN_BACKENDS = (
+    ("DirectShow", cv2.CAP_DSHOW),
+    ("Media Foundation", cv2.CAP_MSMF),
+    ("Auto", cv2.CAP_ANY),
+)
+
+
+def _camera_selection_label(index: int, api_preference: int) -> str:
+    return str(int(index))
+
+
+def _parse_camera_selection(value: str) -> tuple[int, int]:
+    text = str(value or "").strip()
+    try:
+        index = int(text.split("-", 1)[0].strip())
+    except Exception:
+        index = 0
+
+    lowered = text.lower()
+    for name, api in CAMERA_BACKENDS:
+        if name.lower() in lowered:
+            return index, int(api)
+    return index, int(dict(CAMERA_BACKENDS)["Auto"])
+
+
+def _camera_values_from_discovery(
+    discovered: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+    max_index: int = 23,
+) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add(index: int) -> None:
+        label = str(int(index))
+        if label not in seen:
+            seen.add(label)
+            values.append(label)
+
+    for index, api in discovered:
+        add(int(index))
+
+    if values:
+        return values
+
+    for index in range(0, int(max_index) + 1):
+        add(index)
+    return values
+
+
+def _camera_backend_fallbacks(selected_api: int) -> list[int]:
+    backends = dict(CAMERA_BACKENDS)
+    selected = int(selected_api)
+    order = [selected]
+    if selected != int(backends["DirectShow"]):
+        order.append(int(backends["DirectShow"]))
+    if selected != int(backends["Auto"]):
+        order.append(int(backends["Auto"]))
+    return order
+
+
+def _put_latest(q: queue.Queue, item) -> None:
+    try:
+        q.put_nowait(item)
+        return
+    except queue.Full:
+        pass
+    try:
+        q.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        q.put_nowait(item)
+    except queue.Full:
+        pass
+
+
+def _should_publish_live_signal_loss(read_failures: int, threshold: int = 8) -> bool:
+    return int(read_failures) >= int(threshold)
+
+
+def _preprocess_live_frame(frame: np.ndarray, target_w: int, use_opencl: bool = True) -> np.ndarray:
+    out = frame
+    if out.shape[1] != int(target_w) and out.shape[1] > 0:
+        scale = float(target_w) / float(out.shape[1])
+        nh = max(2, int(out.shape[0] * scale))
+        size = (int(target_w), int(nh))
+        if use_opencl:
+            try:
+                u = cv2.UMat(out)
+                out = cv2.resize(u, size, interpolation=cv2.INTER_AREA).get()
+            except Exception:
+                out = cv2.resize(out, size, interpolation=cv2.INTER_AREA)
+        else:
+            out = cv2.resize(out, size, interpolation=cv2.INTER_AREA)
+    if out.shape[0] % 2 == 1:
+        out = out[:-1, :, :]
+    return out
+
+
+def _update_live_track_meta(
+    meta: dict,
+    *,
+    frame_idx: int,
+    base_track: int,
+    field_i: int,
+    rec_def: RecordDefects,
+    sync_u8: int,
+    vjit_u8: int,
+    seg_id: int,
+) -> None:
+    idx = int(base_track + field_i)
+    field_idx = int(frame_idx * 2 + field_i)
+    meta.update(
+        {
+            "dt": 1.0 / 60.0,
+            "fps": 30.0,
+            "frame_idx": int(frame_idx),
+            "field_idx": field_idx,
+            "frame_base_track": int(base_track),
+            "field_in_frame": int(field_i),
+            "head": "A" if field_idx % 2 == 0 else "B",
+            "tape_track": idx,
+            "ctl_sync_u8": int(sync_u8),
+            "ctl_vjit_u8": int(vjit_u8),
+            "tape_mode": str(rec_def.tape_mode),
+            "seg_id": int(seg_id),
+        }
+    )
 
 def _help(purpose: str, low: str, mid: str, high: str, impact: str, scope: str) -> str:
     return (
@@ -156,39 +290,38 @@ SETTING_HELP = {
     "live_overlay": _help("Fullscreen live output window.", "Off keeps output inside app.", "On mirrors live output fullscreen.", "Use for display/capture workflows.", "Does not change recorded signal.", "Live display setting."),
 }
 
-class GradientCanvas(tk.Canvas):
-    def __init__(self, parent, color_a="#071019", color_b="#162536", color_c="#0b0f14", **kwargs):
-        super().__init__(parent, highlightthickness=0, bd=0, **kwargs)
-        self.colors = (color_a, color_b, color_c)
-        self.bind("<Configure>", self._draw)
-
-    @staticmethod
-    def _hex_to_rgb(value: str) -> tuple[int, int, int]:
-        value = value.lstrip("#")
-        return tuple(int(value[i:i+2], 16) for i in (0, 2, 4))
-
-    @staticmethod
-    def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
-        return "#%02x%02x%02x" % rgb
-
-    def _draw(self, _evt=None):
-        self.delete("gradient")
-        w = max(1, self.winfo_width())
-        h = max(1, self.winfo_height())
-        a = self._hex_to_rgb(self.colors[0])
-        b = self._hex_to_rgb(self.colors[1])
-        c = self._hex_to_rgb(self.colors[2])
-        for y in range(h):
-            t = y / max(1, h - 1)
-            if t < 0.55:
-                k = t / 0.55
-                rgb = tuple(int(a[i] + (b[i] - a[i]) * k) for i in range(3))
-            else:
-                k = (t - 0.55) / 0.45
-                rgb = tuple(int(b[i] + (c[i] - b[i]) * k) for i in range(3))
-            self.create_line(0, y, w, y, fill=self._rgb_to_hex(rgb), tags=("gradient",))
-        self.lower("gradient")
-
+SETTING_HELP.update({
+    "crt_enabled": _help("Turns the GPU CRT display pass on for the selected CRT outputs.", "Off bypasses the CRT renderer.", "On enables configured preview/direct/export CRT paths.", "Use with higher quality for stronger phosphor detail.", "Requires the ModernGL/GLFW renderer and OpenGL 3.3.", "CRT display setting."),
+    "crt_preview": _help("Applies CRT simulation inside the Player preview canvas.", "Off keeps Player preview as the VCR image.", "On renders Player preview through the CRT pass.", "Use with lower quality for smoother tuning.", "Adds GPU render work and a readback for the Tk preview.", "Player display setting."),
+    "crt_live": _help("Applies CRT simulation inside the Live preview and overlay.", "Off keeps Live preview lighter.", "On renders Live through the CRT pass.", "Use direct Live output for less Tk preview readback.", "Uses the CRT renderer thread; late live frames are dropped instead of queued forever.", "Live display setting."),
+    "crt_export": _help("Bakes the CRT simulation into MP4 exports.", "Off exports the VCR playback image.", "On renders every export frame through CRT.", "High quality can be slow but cleaner.", "Changes exported video pixels only, not tape tracks.", "Export setting."),
+    "crt_direct": _help("Opens a direct OpenGL CRT window for Player or Live output.", "Off uses only in-app preview.", "On mirrors the selected output to a CRT window.", "Use for smoother display/capture workflows.", "All OpenGL work stays on the CRT renderer thread for thread safety.", "CRT display setting."),
+    "crt_preset": _help("Chooses the CRT tuning base.", "Consumer TV is glowier and softer.", "Use the preset closest to your display target.", "Pro Monitor is sharper and cleaner.", "Updates mask, bloom, curvature, and beam defaults while preserving output toggles.", "CRT tuning setting."),
+    "crt_quality": _help("Controls internal CRT render width presets.", "Draft is fastest.", "Balanced is good for live preview.", "Ultra is slowest and best for final export.", "Higher quality increases GPU load and readback size.", "CRT performance setting."),
+    "crt_mask": _help("Chooses the phosphor mask pattern.", "Aperture is clean vertical stripes.", "Slot resembles consumer slot masks.", "Shadow gives a dot-mask look.", "Changes CRT texture and color separation.", "CRT image setting."),
+    "crt_render_width": _help("Sets the internal simulated phosphor width.", "Lower values are faster.", "Balanced tracks typical preview use.", "Higher values preserve finer mask detail.", "Affects GPU workload and CRT readback size.", "CRT performance setting."),
+    "crt_mask_strength": _help("Controls how strongly phosphor mask color structure is visible.", "Subtle or nearly hidden mask.", "Balanced CRT texture.", "Heavy RGB/slot/dot pattern.", "Can reduce brightness and increase visible texture.", "CRT image setting."),
+    "crt_scanline_strength": _help("Controls CRT beam scanline darkness.", "Almost continuous image.", "Moderate line texture.", "Strong dark scanlines.", "Different from playback scanlines; this happens in the GPU CRT pass.", "CRT image setting."),
+    "crt_beam_sharpness": _help("Controls simulated beam focus.", "Soft beam.", "Balanced consumer focus.", "Sharper monitor-like beam.", "Affects line intensity and perceived detail.", "CRT image setting."),
+    "crt_phosphor_decay": _help("Controls CRT temporal persistence.", "Fast decay, less trailing.", "Mild phosphor memory.", "Stronger glow trails/ghosting.", "Uses previous CRT frame inside the renderer thread.", "CRT temporal setting."),
+    "crt_convergence_x": _help("Offsets red/blue channels horizontally.", "Negative shifts one direction.", "Near zero is aligned.", "Positive shifts the other direction.", "Simulates CRT convergence error.", "CRT image setting."),
+    "crt_convergence_y": _help("Offsets red/blue channels vertically.", "Negative shifts one direction.", "Near zero is aligned.", "Positive shifts the other direction.", "Simulates vertical convergence error.", "CRT image setting."),
+    "crt_bloom": _help("Adds bright-area glow in the CRT pass.", "Cleaner highlights.", "Moderate glow.", "Strong glowing highlights.", "Can soften bright UI/text and increase analog feel.", "CRT image setting."),
+    "crt_halation": _help("Adds warm red/orange light spill around bright areas.", "Little color spill.", "Subtle glass glow.", "Strong halation.", "Works with bloom to create tube-like highlight spread.", "CRT image setting."),
+    "crt_glass_diffusion": _help("Softens the image as if diffused through CRT glass.", "Crisper image.", "Mild glass softness.", "Heavier diffusion.", "Trades sharpness for a smoother display feel.", "CRT image setting."),
+    "crt_curvature": _help("Warps the image with CRT tube curvature.", "Flat display.", "Subtle tube curve.", "Strong rounded geometry.", "May crop/warp edges with overscan.", "CRT geometry setting."),
+    "crt_overscan": _help("Expands the image past the visible CRT edge.", "Little cropping.", "Classic slight overscan.", "More edge crop.", "Useful for hiding unstable frame edges.", "CRT geometry setting."),
+    "crt_vignette": _help("Darkens CRT edges and corners.", "Even brightness.", "Subtle corner falloff.", "Strong corner darkening.", "Adds tube/monitor edge character.", "CRT image setting."),
+    "crt_edge_focus": _help("Softens focus toward the CRT edges.", "Uniform focus.", "Mild edge softness.", "Strong edge blur.", "Pairs with curvature for older display behavior.", "CRT image setting."),
+    "crt_brightness": _help("Trims CRT output brightness after the display pass.", "Darker CRT output.", "Neutral brightness.", "Brighter CRT output.", "Applies after mask, bloom, and vignette.", "CRT image trim."),
+    "crt_contrast": _help("Trims CRT output contrast after the display pass.", "Flatter CRT output.", "Neutral contrast.", "Punchier CRT output.", "Applies after CRT optical effects.", "CRT image trim."),
+    "crt_saturation": _help("Trims CRT output saturation after the display pass.", "Muted color.", "Neutral color.", "More saturated color.", "Applies after mask/convergence effects.", "CRT image trim."),
+    "live_cam": _help("Selects the camera index used by Live mode.", "Use Refresh to discover connected cameras.", "Pick a listed camera index.", "Type a higher index manually if needed.", "Backend fallback happens internally; the dropdown stays index-only.", "Live input setting."),
+    "live_bufsec": _help("Length of the live VHS ring buffer.", "Lower buffer reduces memory and relock distance.", "Balanced buffer gives room for VHS instability.", "Longer buffer costs more memory.", "Does not intentionally add display delay; live workers drop stale frames.", "Live pipeline setting."),
+    "live_downscale_width": _help("Live recording/preprocess width.", "Lower values are faster and softer.", "Balanced values fit real-time tuning.", "Higher values keep more detail but cost more CPU/GPU.", "Resize uses OpenCL/UMat when available, then CPU VHS encoding continues.", "Live performance setting."),
+    "live_mode": _help("Starts or stops the staged live pipeline.", "Off releases the camera and clears CRT live output.", "On starts capture and processing workers.", "Use with direct CRT output for smoother external display.", "Capture, VHS processing, and CRT rendering stay on separate thread-safe paths.", "Live workflow setting."),
+    "live_overlay": _help("Mirrors Live preview to a fullscreen Tk overlay.", "Off keeps output in the app.", "On opens fullscreen overlay.", "Use direct CRT Live for an OpenGL output window instead.", "Overlay displays the latest published frame and does not alter tape data.", "Live display setting."),
+})
 
 class HelpTooltip:
     def __init__(self, widget, text: str):
@@ -321,8 +454,22 @@ class DigitalVCRApp:
         self._live_cap = None
         self._live_tape = None
         self._live_cam_index = 0
+        self._live_cam_backend = int(dict(CAMERA_BACKENDS)["Auto"])
+        self._camera_backend_by_index = {}
+        self._live_active_backend = None
+        self._live_read_failures = 0
         self._live_seg_id = int(time.time()*1000) & 0x7fffffff
+        self._live_frame_idx = 0
+        self._live_publish_seq = 0
+        self._live_frame_q = queue.Queue(maxsize=2)
+        self._live_crt_q = queue.Queue(maxsize=1)
+        self._live_cap_lock = threading.Lock()
+        self._camera_refreshing = False
         self.live_player = VCRPlayer()
+        self._live_capture_thread = threading.Thread(target=self._live_capture_loop, daemon=True)
+        self._live_capture_thread.start()
+        self._live_crt_thread = threading.Thread(target=self._live_crt_worker_loop, daemon=True)
+        self._live_crt_thread.start()
         self._live_worker_thread = threading.Thread(target=self._live_worker_loop, daemon=True)
         self._live_worker_thread.start()
 
@@ -353,8 +500,7 @@ class DigitalVCRApp:
         except Exception:
             pass
         try:
-            if self._live_cap is not None:
-                self._live_cap.release()
+            self._release_live_capture()
         except Exception:
             pass
         try:
@@ -716,8 +862,8 @@ class DigitalVCRApp:
 
     # ---------- UI ----------
     def _build_ui(self):
-        self.gradient = GradientCanvas(self.root, bg=DARK_BG)
-        self.gradient.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.backdrop = ctk.CTkFrame(self.root, fg_color=DARK_BG, corner_radius=0)
+        self.backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         shell = ctk.CTkFrame(self.root, fg_color="transparent", corner_radius=0)
         shell.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -761,7 +907,7 @@ class DigitalVCRApp:
 
         ctk.CTkLabel(
             self.sidebar,
-            text="Studio Console\nDark gradient interface\nHover ? for setting help",
+            text="Studio Console\nLive VHS + CRT pipeline\nHover ? for setting help",
             justify="left",
             font=("Segoe UI", 10),
             text_color=MUTED,
@@ -1576,7 +1722,7 @@ class DigitalVCRApp:
         self.live_cam_var = tk.StringVar(value=str(int(getattr(self, "_live_cam_index", 0))))
         self._setting_header(left, "Camera index", "live_cam")
         cam_row = ctk.CTkFrame(left, fg_color="transparent"); cam_row.pack(anchor="w", fill="x", pady=4)
-        self.live_cam_combo = ctk.CTkComboBox(cam_row, width=110, values=["0"], variable=self.live_cam_var, fg_color=SURFACE_BG, border_color=BORDER, button_color=CARD_BG_2, text_color=TEXT)
+        self.live_cam_combo = ctk.CTkComboBox(cam_row, width=220, values=["0 - Auto"], variable=self.live_cam_var, fg_color=SURFACE_BG, border_color=BORDER, button_color=CARD_BG_2, text_color=TEXT)
         self.live_cam_combo.pack(side="left", padx=(0,6))
         self._button(cam_row, "Refresh", self._refresh_cameras, width=92).pack(side="left")
         self._refresh_cameras()
@@ -1606,7 +1752,7 @@ class DigitalVCRApp:
         self._help_button(row, "live_downscale_width", "Downscale width (px)").pack(side="left", padx=(7, 0))
         ctk.CTkLabel(row, textvariable=self.var_live_downscale_width, text_color=MUTED).pack(side="right")
         ctk.CTkSlider(left, from_=240, to=960, variable=self.var_live_downscale_width, progress_color=ACCENT, button_color=ACCENT_ACTIVE).pack(fill="x")
-        ctk.CTkLabel(left, text="Higher = sharper, more CPU.", text_color=MUTED).pack(anchor="w", pady=(0,4))
+        ctk.CTkLabel(left, text="Higher = sharper; OpenCL resize helps when available, VHS encode remains CPU.", text_color=MUTED, wraplength=360, justify="left").pack(anchor="w", pady=(0,4))
 
         # Video record-side sliders
         self._slider(left, "Luma bandwidth", "luma_bw", 0.35, 1.0, key="rec")
@@ -1691,7 +1837,25 @@ class DigitalVCRApp:
         self._live_ui_loop()
 
     def _refresh_cameras(self):
-        avail = []
+        current = str(self.live_cam_var.get()) if hasattr(self, "live_cam_var") else "0"
+        values = _camera_values_from_discovery([], max_index=7)
+        self._apply_camera_values(values, current)
+        if getattr(self, "_camera_refreshing", False):
+            return
+        self._camera_refreshing = True
+        try:
+            self.live_status.set("Scanning DirectShow cameras in background...")
+        except Exception:
+            pass
+
+        def worker():
+            avail = self._scan_cameras_directshow()
+            self._q("call", lambda: self._finish_camera_refresh(avail))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _scan_cameras_directshow(self) -> list[tuple[int, int]]:
+        avail: list[tuple[int, int]] = []
         old_log_level = None
         try:
             if hasattr(cv2, "getLogLevel") and hasattr(cv2, "setLogLevel"):
@@ -1700,32 +1864,55 @@ class DigitalVCRApp:
         except Exception:
             old_log_level = None
         try:
-            for i in range(0, 8):
-                cap = None
-                try:
-                    cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-                    if cap is not None and cap.isOpened():
-                        avail.append(i)
-                except Exception:
-                    pass
-                try:
-                    if cap is not None:
-                        cap.release()
-                except Exception:
-                    pass
+            seen = set()
+            for i in range(0, 24):
+                for _name, api in CAMERA_SCAN_BACKENDS:
+                    cap = None
+                    try:
+                        cap = cv2.VideoCapture(i, int(api))
+                        if cap is not None and cap.isOpened() and i not in seen:
+                            seen.add(i)
+                            avail.append((i, int(api)))
+                            break
+                    except Exception:
+                        pass
+                    try:
+                        if cap is not None:
+                            cap.release()
+                    except Exception:
+                        pass
         finally:
             try:
                 if old_log_level is not None:
                     cv2.setLogLevel(old_log_level)
             except Exception:
                 pass
-        if not avail:
-            avail = [0]
-        values = [str(i) for i in avail]
+        return avail
+
+    def _finish_camera_refresh(self, avail: list[tuple[int, int]]):
+        self._camera_refreshing = False
+        self._camera_backend_by_index = {int(index): int(api) for index, api in avail}
+        cur = str(self.live_cam_var.get()) if hasattr(self, "live_cam_var") else "0"
+        values = _camera_values_from_discovery(avail, max_index=7)
+        self._apply_camera_values(values, cur)
+        try:
+            if avail:
+                self.live_status.set(f"Camera scan ready: {len(avail)} camera input(s) found.")
+            else:
+                self.live_status.set("Camera scan ready: no camera inputs opened. You can still type an index manually.")
+        except Exception:
+            pass
+
+    def _apply_camera_values(self, values: list[str], current: str):
         self.live_cam_combo.configure(values=values)
-        cur = str(self.live_cam_var.get()) if hasattr(self, "live_cam_var") else str(avail[0])
+        cur = str(current)
         if cur not in values:
-            cur = str(avail[0])
+            try:
+                idx, api = _parse_camera_selection(cur)
+                label = _camera_selection_label(idx, api)
+                cur = label if label in values or str(cur).strip().isdigit() else values[0]
+            except Exception:
+                cur = values[0]
         self.live_cam_combo.set(cur)
         try:
             self.live_cam_var.set(str(cur))
@@ -1739,7 +1926,9 @@ class DigitalVCRApp:
         except Exception:
             on = False
         try:
-            self._live_cam_index = int(self.live_cam_var.get())
+            cam_idx, cam_api = _parse_camera_selection(self.live_cam_var.get())
+            self._live_cam_index = int(cam_idx)
+            self._live_cam_backend = int(getattr(self, "_camera_backend_by_index", {}).get(int(cam_idx), cam_api))
         except Exception:
             pass
         try:
@@ -1747,23 +1936,106 @@ class DigitalVCRApp:
         except Exception:
             pass
         self._live_on = on
-        old_cap = self._live_cap
-        self._live_cap = None
-        if not on and old_cap is not None:
-            try:
-                old_cap.release()
-            except Exception:
-                pass
+        self._clear_live_frame_queue()
         if on:
+            self._latest_live_frame = None
+            self._live_last_good = None
             try:
                 self.live_status.set("Live mode: starting…")
             except Exception:
                 pass
         else:
+            self._clear_live_output_state()
             try:
                 self.live_status.set("Live mode: off")
             except Exception:
                 pass
+
+    def _clear_live_frame_queue(self):
+        q = getattr(self, "_live_frame_q", None)
+        self._drain_queue(q)
+        q = getattr(self, "_live_crt_q", None)
+        self._drain_queue(q)
+
+    def _drain_queue(self, q):
+        if q is None:
+            return
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                return
+            except Exception:
+                return
+
+    def _release_live_capture(self):
+        lock = getattr(self, "_live_cap_lock", None)
+        if lock is None:
+            old_cap = getattr(self, "_live_cap", None)
+            self._live_cap = None
+        else:
+            with lock:
+                old_cap = getattr(self, "_live_cap", None)
+                self._live_cap = None
+        if old_cap is not None:
+            try:
+                old_cap.release()
+            except Exception:
+                pass
+        self._live_active_backend = None
+        self._live_read_failures = 0
+
+    def _clear_live_output_state(self):
+        self._latest_live_frame = None
+        self._live_last_good = None
+        self._live_tape = None
+        try:
+            self.live_player.eject()
+        except Exception:
+            pass
+        try:
+            self.crt_renderer.close_direct("live")
+        except Exception:
+            pass
+        for attr, text in (("live_canvas", "Live output"), ("_live_overlay_label", "")):
+            label = getattr(self, attr, None)
+            if label is None:
+                continue
+            try:
+                label.configure(image="", text=text)
+                label.image = None
+            except Exception:
+                pass
+
+    def _publish_live_frame(self, frame: np.ndarray | None):
+        if not getattr(self, "_live_on", False):
+            return
+        if frame is None:
+            return
+        seq = int(getattr(self, "_live_publish_seq", 0)) + 1
+        self._live_publish_seq = seq
+        self._latest_live_frame = frame
+        try:
+            settings = getattr(self, "_cached_crt_settings", getattr(self, "crt_settings", consumer_tv_preset())).validated()
+            if settings.enabled and (settings.live_enabled or settings.direct_live):
+                _put_latest(self._live_crt_q, (seq, frame.copy()))
+        except Exception:
+            pass
+
+    def _publish_live_crt_frame(self, seq: int, frame: np.ndarray | None):
+        if frame is None or not getattr(self, "_live_on", False):
+            return
+        if int(seq) != int(getattr(self, "_live_publish_seq", seq)):
+            return
+        self._latest_live_frame = frame
+
+    def _mark_live_stopped_from_worker(self):
+        try:
+            if hasattr(self, "live_toggle_var"):
+                self.live_toggle_var.set(False)
+        except Exception:
+            pass
+        self._clear_live_output_state()
 
     def _toggle_live_overlay(self):
         try:
@@ -1828,34 +2100,118 @@ class DigitalVCRApp:
             except Exception:
                 pass
 
+    def _live_capture_loop(self):
+        while not self._live_worker_stop.is_set():
+            if not getattr(self, "_live_on", False):
+                self._release_live_capture()
+                time.sleep(0.05)
+                continue
+
+            with self._live_cap_lock:
+                cap = self._live_cap
+            if cap is None:
+                cam_idx = int(getattr(self, "_live_cam_index", 0))
+                cam_api = int(getattr(self, "_live_cam_backend", dict(CAMERA_BACKENDS)["Auto"]))
+                opened_api = None
+                for candidate_api in _camera_backend_fallbacks(cam_api):
+                    cap = cv2.VideoCapture(cam_idx, candidate_api)
+                    if cap is not None and cap.isOpened():
+                        opened_api = int(candidate_api)
+                        break
+                    try:
+                        if cap is not None:
+                            cap.release()
+                    except Exception:
+                        pass
+                    cap = None
+                if cap is None or opened_api is None:
+                    self._q("status_live", f"Live: could not open camera {_camera_selection_label(cam_idx, cam_api)}")
+                    self._live_on = False
+                    self._q("call", self._mark_live_stopped_from_worker)
+                    time.sleep(0.2)
+                    continue
+                try:
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
+                with self._live_cap_lock:
+                    self._live_cap = cap
+                    self._live_active_backend = opened_api
+                    self._live_read_failures = 0
+                self._clear_live_frame_queue()
+                self._q("status_live", f"Live: camera {_camera_selection_label(cam_idx, opened_api)} opened")
+
+            try:
+                with self._live_cap_lock:
+                    cap = self._live_cap
+                if cap is None:
+                    continue
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    self._live_read_failures = 0
+                    _put_latest(self._live_frame_q, frame)
+                else:
+                    self._live_read_failures = int(getattr(self, "_live_read_failures", 0)) + 1
+                    if _should_publish_live_signal_loss(self._live_read_failures):
+                        _put_latest(self._live_frame_q, None)
+                        selected_api = int(getattr(self, "_live_cam_backend", dict(CAMERA_BACKENDS)["Auto"]))
+                        active_api = int(getattr(self, "_live_active_backend", selected_api))
+                        fallbacks = _camera_backend_fallbacks(selected_api)
+                        try:
+                            next_api = fallbacks[fallbacks.index(active_api) + 1]
+                        except Exception:
+                            next_api = None
+                        self._release_live_capture()
+                        if next_api is not None:
+                            self._live_cam_backend = int(next_api)
+                            self._q("status_live", f"Live: backend failed to grab frames; trying {_camera_selection_label(int(getattr(self, '_live_cam_index', 0)), next_api)}")
+                        else:
+                            self._q("status_live", "Live: camera opened but could not grab frames. Try another backend from the camera list.")
+                            self._live_on = False
+                            self._q("call", self._mark_live_stopped_from_worker)
+            except Exception:
+                self._live_read_failures = int(getattr(self, "_live_read_failures", 0)) + 1
+                if _should_publish_live_signal_loss(self._live_read_failures):
+                    _put_latest(self._live_frame_q, None)
+                time.sleep(0.01)
+
+    def _live_crt_worker_loop(self):
+        while not self._live_worker_stop.is_set():
+            try:
+                if not getattr(self, "_live_on", False):
+                    time.sleep(0.05)
+                    continue
+                try:
+                    item = self._live_crt_q.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if isinstance(item, tuple) and len(item) == 2:
+                    seq, frame = item
+                else:
+                    seq, frame = 0, item
+                if frame is None or not getattr(self, "_live_on", False):
+                    continue
+                out = self._apply_crt_to_frame(frame, "live")
+                self._publish_live_crt_frame(seq, out)
+            except Exception:
+                try:
+                    self._live_worker_error = traceback.format_exc()
+                    print(self._live_worker_error)
+                except Exception:
+                    pass
+                time.sleep(0.05)
+
     def _live_worker_loop(self):
-        # Worker thread: capture camera -> encode to tape tracks -> decode via player -> store latest frame
+        # Worker thread: latest captured camera frame -> VHS tracks -> player decode -> publish.
         t_last = time.perf_counter()
-        drop_n = 0
         while not self._live_worker_stop.is_set():
             try:
                 if not getattr(self, "_live_on", False):
                     time.sleep(0.05)
                     continue
 
-                # Open/reopen capture if needed
-                if self._live_cap is None:
-                    cam_idx = int(getattr(self, "_live_cam_index", 0))
-                    self._live_cam_index = cam_idx
-
-                    cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW)
-                    if not cap.isOpened():
-                        self._q("status_live", f"Live: could not open camera {cam_idx}")
-                        self._live_on = False
-                        time.sleep(0.2)
-                        continue
-                    try:
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    except Exception:
-                        pass
-                    self._live_cap = cap
-
-                    # Create ring tape buffer
+                # Create/recreate ring tape buffer when a live session starts.
+                if self._live_tape is None:
                     try:
                         bufsec = float(getattr(self, "_cached_live_bufsec", 6.0))
                     except Exception:
@@ -1866,8 +2222,9 @@ class DigitalVCRApp:
                     self.live_player.insert()
                     self.live_player.play()
                     self._live_seg_id = int(time.time()*1000) & 0x7fffffff
+                    self._live_frame_idx = 0
+                    self._live_write_base = 0
 
-                    self._q("status_live", f"Live: camera {cam_idx} opened")
                     t_last = time.perf_counter()
 
                 # snapshot defs/options (worker never touches Tk vars)
@@ -1897,9 +2254,17 @@ class DigitalVCRApp:
                     time.sleep(0.05)
                     continue
 
-                # Update servo (advances tape position)
-                self.live_player.update(tape, pb_def)
-                base = int(self.live_player.state.pos_tracks)
+                try:
+                    captured = self._live_frame_q.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+
+                # Live writes one fresh field-pair per processed camera frame.
+                # Do not let wall-clock servo advancement skip ahead into blank
+                # ring-buffer tracks when processing stalls.
+                base = int(getattr(self, "_live_write_base", 0))
+                self.live_player.state.pos_tracks = float(base)
+                self.live_player.state._last_pos_tracks = float(base)
 
                 # Wrap ring buffer cleanly
                 if base >= tape.cart.length_tracks - 4:
@@ -1907,15 +2272,10 @@ class DigitalVCRApp:
                     self.live_player.state._last_pos_tracks = 0.0
                     self.live_player._cache.clear()
                     base = 0
+                    self._live_write_base = 0
 
-                # Capture frame (drop buffered frames if we fall behind to avoid 'fast old frames')
-                try:
-                    for _ in range(int(drop_n)):
-                        self._live_cap.grab()
-                except Exception:
-                    pass
-                ok, frame = self._live_cap.read()
-                if not ok or frame is None:
+                frame = captured
+                if frame is None:
                     # Camera frame-drop -> write a weak/garbled control track for this moment.
                     # This makes Live behave like a real VCR losing RF/sync briefly instead of just "skipping".
                     try:
@@ -1930,7 +2290,7 @@ class DigitalVCRApp:
                             # Control track becomes weak; vertical jitter spikes.
                             sync_u8 = int(np.clip(np.random.randint(8, 42), 0, 255))
                             vjit_u8 = int(np.clip(np.random.randint(180, 255), 0, 255))
-                            dt_field = 1.0 / 60.0
+                            frame_idx = int(getattr(self, "_live_frame_idx", 0))
 
                             for field_i, (yy, cc, meta_src) in enumerate([
                                 (y0b, c0b, last.get("meta0", {})),
@@ -1938,16 +2298,20 @@ class DigitalVCRApp:
                             ]):
                                 idx = base + field_i
                                 meta = dict(meta_src) if isinstance(meta_src, dict) else {}
-                                meta.update({
-                                    "dt": dt_field,
-                                    "seg_id": int(self._live_seg_id),
-                                    "ctl_sync_u8": int(sync_u8),
-                                    "ctl_vjit_u8": int(vjit_u8),
-                                    "tape_mode": str(rec_def.tape_mode),
-                                    "field": int(field_i),
-                                    "capture_drop": True,
-                                })
+                                _update_live_track_meta(
+                                    meta,
+                                    frame_idx=frame_idx,
+                                    base_track=base,
+                                    field_i=field_i,
+                                    rec_def=rec_def,
+                                    sync_u8=sync_u8,
+                                    vjit_u8=vjit_u8,
+                                    seg_id=int(self._live_seg_id),
+                                )
+                                meta["field"] = int(field_i)
+                                meta["capture_drop"] = True
                                 tape.cart.set(idx, TapeTrack(y_dphi8=yy, c_u8=cc, meta=meta))
+                            self._live_frame_idx = frame_idx + 1
                         else:
                             # No last frame yet -> leave track empty (brief black / unlock).
                             try:
@@ -1957,25 +2321,18 @@ class DigitalVCRApp:
                                 pass
 
                         out = self.live_player.get_frame(tape, pb_def)
-                        self._latest_live_frame = self._apply_crt_to_frame(out, "live")
+                        self._publish_live_frame(out)
+                        self._live_write_base = int(base + 2)
                     except Exception:
                         pass
                     time.sleep(0.005)
                     continue
 
-                # Downscale to recorder width (preserve aspect)
                 try:
                     target_w = int(max(64, (live_w if int(live_w)>0 else getattr(opts, "downscale_width", 360))))
                 except Exception:
                     target_w = 360
-                if frame.shape[1] != target_w and frame.shape[1] > 0:
-                    scale = float(target_w) / float(frame.shape[1])
-                    nh = max(2, int(frame.shape[0] * scale))
-                    frame = cv2.resize(frame, (target_w, nh), interpolation=cv2.INTER_AREA)
-
-                # Even height for field split
-                if frame.shape[0] % 2 == 1:
-                    frame = frame[:-1, :, :]
+                frame = _preprocess_live_frame(frame, target_w, use_opencl=True)
 
                 f0, f1 = sample_fields_from_frame(frame, getattr(opts, 'field_sampling', 'interlaced'))
 
@@ -2055,16 +2412,21 @@ class DigitalVCRApp:
                         pass
 
                 sync_u8, vjit_u8 = self.recorder._control_track_values(rec_def)
-                dt_field = 1.0/60.0
+                frame_idx = int(getattr(self, "_live_frame_idx", 0))
 
                 for field_i, (yy, cc, meta) in enumerate([(y0, c0, meta0), (y1, c1, meta1)]):
                     idx = base + field_i
+                    _update_live_track_meta(
+                        meta,
+                        frame_idx=frame_idx,
+                        base_track=base,
+                        field_i=field_i,
+                        rec_def=rec_def,
+                        sync_u8=sync_u8,
+                        vjit_u8=vjit_u8,
+                        seg_id=int(self._live_seg_id),
+                    )
                     meta.update({
-                        "dt": dt_field,
-                        "seg_id": int(self._live_seg_id),
-                        "ctl_sync_u8": int(sync_u8),
-                        "ctl_vjit_u8": int(vjit_u8),
-                        "tape_mode": str(rec_def.tape_mode),
                         "field": int(field_i),
                         "real_rf_modulation": bool(getattr(rec_def, 'real_rf_modulation', False)),
                         "rf_fm_depth": float(getattr(rec_def, 'rf_fm_depth', 1.0)),
@@ -2072,6 +2434,7 @@ class DigitalVCRApp:
                         "rf_chroma_lpf": float(getattr(rec_def, 'rf_chroma_lpf', 0.35)),
                     })
                     tape.cart.set(idx, TapeTrack(y_dphi8=yy, c_u8=cc, meta=meta))
+                self._live_frame_idx = frame_idx + 1
 
 
                 try:
@@ -2080,7 +2443,8 @@ class DigitalVCRApp:
                     pass
 
                 out = self.live_player.get_frame(tape, pb_def)
-                self._latest_live_frame = self._apply_crt_to_frame(out, "live")
+                self._publish_live_frame(out)
+                self._live_write_base = int(base + 2)
 
                 # Pace slightly (avoid hogging CPU)
                 now = time.perf_counter()
@@ -2097,8 +2461,7 @@ class DigitalVCRApp:
                 time.sleep(0.02)
 
         try:
-            if self._live_cap is not None:
-                self._live_cap.release()
+            self._release_live_capture()
         except Exception:
             pass
 

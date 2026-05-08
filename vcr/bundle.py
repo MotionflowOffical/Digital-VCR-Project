@@ -272,7 +272,7 @@ def load_bundle(folder: str) -> Tuple[TapeImage, Dict[str, Any]]:
     if length_tracks <= 0:
         raise ValueError("Invalid tape_info.json (length_tracks).")
 
-    # Prefer split luma/chroma files (v6.13.3+)
+    # Prefer the current split luma/chroma files.
     luma_path = src / "tape_luma.npz"
     chroma_path = src / "tape_chroma.npz"
     legacy_path = src / "tape.npz"
@@ -317,7 +317,7 @@ def load_bundle(folder: str) -> Tuple[TapeImage, Dict[str, Any]]:
         # Legacy single-file format
         z = np.load(legacy_path, allow_pickle=False)
         if "track_index" not in z:
-            raise ValueError("Unsupported bundle format (no track_index). Re-save the bundle with v6+.")
+            raise ValueError("Unsupported bundle format (no track_index). Re-save the bundle with a current Digital VCR build.")
 
         indices = z["track_index"].astype(np.int32)
         y_data = z["y_data"].astype(np.uint8)

@@ -13,3 +13,7 @@ tests/__pycache__/test_crt.cpython-310-pytest-8.2.0.pyc
 
 # vcr module cache files
 vcr/__pycache__/
+
+\tests\__pycache__
+
+\dist
