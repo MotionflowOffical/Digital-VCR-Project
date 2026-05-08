@@ -1,6 +1,6 @@
-# Digital VCR (v6.13.6)
+# Digital VCR (V6_13_7)
 
-A desktop VHS-style video recorder and playback simulator built with **Tkinter + OpenCV + NumPy**.
+A desktop VHS-style video recorder and playback simulator built with **CustomTkinter + OpenCV + NumPy**.
 It records source video into a custom tape format, plays it back with tracking/RF defects,
 and exports the result as MP4.
 
@@ -9,7 +9,8 @@ better **field pairing**, and improved handling for **progressive / variable-fra
 
 ## Highlights
 
-- **Recorder, Player, VHS Tape, and Live tabs** in one desktop app.
+- **Recorder, Player, VHS Tape, and Live pages** in one desktop app.
+- **Modern Studio Console UI** with left-sidebar navigation, dark gradients, and per-setting `?` hover help.
 - **Tape bundle workflow**: create, load, save, and keep working directly from a bundle folder.
 - **Threaded UI paths** for playback, scrubbing, preview, and bundle loading.
 - **Optional RF carrier round-trip model** for more analog-like luma/chroma degradation.
@@ -18,6 +19,15 @@ better **field pairing**, and improved handling for **progressive / variable-fra
 - **Backward-compatible bundle loading** for older `tape.npz` tapes.
 
 ## What changed vs v6.13.1
+
+### V6_13_7
+- Rebuilt the desktop UI with **CustomTkinter**, left-sidebar navigation, a dark Studio Console palette, and gradient-backed app shell.
+- Added `?` hover help beside user-adjustable settings so ranges explain low/mid/high behavior, visual/audio/performance impact, and whether changes are baked or playback-only.
+- Refreshed the desktop UI with a professional dark theme and clearer playback controls.
+- Fixed unsafe worker-thread access to Tk variables during load, record, live capture, and proxy playback.
+- Added in-app tape audio preview and clearer playback audio status, so audio does not need to be exported just to check it.
+- Removed duplicated ffmpeg audio extraction during recording for faster record startup and lower CPU/disk load.
+- Fixed live-mode status updates and camera release behavior.
 
 ### v6.13.6
 - Added a dedicated **VHS Tape** tab for advanced RF / tape modelling controls.
@@ -58,6 +68,7 @@ python main.py
 - OpenCV
 - Pillow
 - imageio-ffmpeg
+- CustomTkinter
 
 Installed from `requirements.txt`:
 
@@ -66,9 +77,10 @@ numpy>=1.24
 opencv-python>=4.7
 Pillow>=10.0
 imageio-ffmpeg>=0.4.9
+customtkinter>=5.2.2
 ```
 
-## Main tabs
+## Main sidebar pages
 
 ### Recorder
 Use this to:
@@ -201,4 +213,3 @@ vcr/
 tools/
 └── capture_screen.py
 ```
-

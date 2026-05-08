@@ -1,6 +1,7 @@
 from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import customtkinter as ctk
 import threading
 import queue
 import cv2
@@ -28,51 +29,231 @@ from ..defects import (
 )
 from ..modulation import decode_field_bgr
 
-class VScrollFrame(ttk.Frame):
+APP_VERSION = "V6_13_7"
+
+DARK_BG = "#0b0f14"
+PANEL_BG = "#111821"
+PANEL_BG_2 = "#16202b"
+SURFACE_BG = "#0f151d"
+BORDER = "#253241"
+TEXT = "#e7edf4"
+MUTED = "#96a3b3"
+ACCENT = "#4ea1ff"
+ACCENT_ACTIVE = "#6fb4ff"
+SIDEBAR_BG = "#0d131b"
+CARD_BG = "#121a24"
+CARD_BG_2 = "#182332"
+TOOLTIP_BG = "#101923"
+
+def _help(purpose: str, low: str, mid: str, high: str, impact: str, scope: str) -> str:
+    return (
+        f"{purpose}\n\n"
+        f"Low: {low}\n"
+        f"Mid: {mid}\n"
+        f"High: {high}\n\n"
+        f"Impact: {impact}\n"
+        f"Scope: {scope}"
+    )
+
+SETTING_HELP = {
+    "base_dir": _help("Folder used when creating new tape bundles.", "Type a simple local folder.", "Use a project tape library.", "Use a large fast disk for many bundles.", "Affects where bundle files are stored, not image quality.", "Workflow setting."),
+    "tape_minutes": _help("Length of a newly created blank tape.", "Short tests and quick previews.", "Normal working tapes.", "Long sessions with more disk/RAM use.", "Longer tapes allocate more track/audio capacity.", "New-tape setting."),
+    "recpos": _help("Track where recording will begin overwriting tape.", "Start near the beginning.", "Insert into the current program.", "Record near the end of the tape.", "Controls edit point and where audio/video are written.", "Baked into the tape."),
+    "scrub": _help("Preview a track location without playing in real time.", "Start of tape.", "Middle of tape.", "Later tape locations.", "Useful for finding edit points; does not alter media.", "Preview-only setting."),
+    "source_file": _help("Input video file to record into the virtual tape.", "Small source files are faster.", "Typical MP4/MOV/MKV sources.", "Large/high-res files need more CPU.", "Source resolution and codec affect recording speed.", "Recording input."),
+    "monitor_mode": _help("Chooses what the recorder preview shows while recording.", "Input shows the source before tape encoding.", "Tape shows the recorded result.", "Use tape for final confidence checks.", "Input is faster; tape preview reflects VHS processing.", "Preview-only setting."),
+    "downscale_width": _help("Horizontal resolution recorded to tape.", "Softer image, faster recording.", "Balanced VHS-like detail.", "Sharper image, more CPU and memory.", "Higher values improve detail but slow encoding/playback.", "Baked into recording."),
+    "field_sampling": _help("How source frames become VHS-style fields.", "Interlaced preserves line split behavior.", "Progressive reduces false combing.", "Use progressive for most digital sources.", "Affects motion/detail character before recording.", "Baked into recording."),
+    "encode_threads": _help("CPU worker count used during recording.", "1 is predictable and lower load.", "Auto balances speed and responsiveness.", "More threads can record faster but use more CPU.", "Affects recording speed, not final look.", "Recording performance setting."),
+    "real_rf_modulation": _help("Runs the advanced FM/AM RF round-trip when recording.", "Off uses the faster byte-domain path.", "On adds analog-like carrier behavior.", "Heavy RF settings can become unstable.", "More realistic but slower recording.", "Baked into recording."),
+    "tape_mode": _help("Tape speed/quality model.", "SP is cleaner and most stable.", "LP adds moderate degradation.", "EP is softer/noisier and more unstable.", "Changes how strongly defects are applied.", "Baked into recording/live buffer."),
+    "luma_bw": _help("Brightness-detail bandwidth recorded to tape.", "Softer luminance/detail.", "Balanced VHS softness.", "More fine brightness detail.", "Affects sharpness and text readability.", "Baked into recording."),
+    "chroma_bw": _help("Color-detail bandwidth recorded to tape.", "Bleedier, softer color.", "Moderate VHS color softness.", "Cleaner color edges.", "Lower values look more VHS-like; higher is cleaner.", "Baked into recording."),
+    "record_blur": _help("Optical/tape softness applied while recording.", "Cleaner, sharper source.", "Mild VHS softness.", "Heavy blur and detail loss.", "Softens all recorded frames.", "Baked into recording."),
+    "record_jitter": _help("Horizontal line jitter written into tape fields.", "Stable image.", "Small analog wiggle.", "Strong line wobble/tearing.", "Adds unstable tape transport character.", "Baked into recording."),
+    "record_rf_noise": _help("RF noise applied at record time.", "Clean signal.", "Light analog speckle/noise.", "Noisy, unstable signal.", "Can reduce clarity and increase snow-like artifacts.", "Baked into recording."),
+    "record_dropouts": _help("Signal loss events while recording.", "Few or no dropouts.", "Occasional tape damage.", "Frequent visible dropouts.", "Creates lost/garbled parts of the tape signal.", "Baked into recording."),
+    "ar_wow": _help("Record-time audio pitch wobble.", "Stable pitch.", "Subtle VHS wow/flutter.", "Obvious pitch warble.", "Affects recorded audio tone and timing.", "Baked into tape audio."),
+    "ar_hiss": _help("Record-time audio noise floor.", "Cleaner audio.", "Light tape hiss.", "Very noisy audio.", "Adds hiss before audio is stored.", "Baked into tape audio."),
+    "ar_dropouts": _help("Record-time audio level dropouts.", "Few dropouts.", "Occasional dips.", "Frequent audio gaps.", "Simulates tape audio loss.", "Baked into tape audio."),
+    "ar_compression": _help("VHS linear-track audio bandwidth/compression amount.", "More source-like audio.", "Balanced VHS narrowing.", "Heavier band-limit/companding.", "Changes tone and dynamic range.", "Baked into tape audio."),
+    "rt_record": _help("Paces recording in real time.", "Off records as fast as possible.", "On matches real-time recording.", "Use on for monitoring feel.", "Off improves throughput; on improves live monitoring.", "Recording workflow setting."),
+    "audio_extract": _help("Extracts source audio into the tape.", "Off records silent/blank tape audio.", "On stores source audio.", "Use on when final export needs audio.", "Adds ffmpeg work during recording.", "Baked into tape audio."),
+    "autosave": _help("Automatically saves the active bundle after recording.", "Off keeps changes in memory.", "On writes bundle after record.", "Use on for safer long sessions.", "Adds disk write time after recording.", "Workflow setting."),
+    "edit_live_preview": _help("Runs the editor preview continuously.", "Off saves CPU.", "On shows moving preview.", "Use on while tuning dub settings.", "Consumes CPU but does not alter tape.", "Preview-only setting."),
+    "dub_realtime": _help("Paces save/dub in real time.", "Off processes faster.", "On mimics real-time dub.", "Use on for monitoring behavior.", "Affects save/dub duration only.", "Workflow setting."),
+    "export_video": _help("Exports output.mp4 after saving/dubbing.", "Off only saves bundle.", "On also renders video.", "Use on for shareable output.", "Adds export time and disk use.", "Export workflow setting."),
+    "aspect_display": _help("Display aspect for playback preview/export.", "4:3 classic VHS frame.", "Use source-appropriate choice.", "16:9 widescreen presentation.", "Adds letter/pillarboxing as needed.", "Playback/export setting."),
+    "tracking_knob": _help("Manual tracking control.", "Biases one side of tracking.", "Centered/neutral tracking.", "Biases the other side.", "Poor tracking increases tearing/snow.", "Playback-only setting."),
+    "tracking_sensitivity": _help("How strongly tracking mismatch affects playback.", "Forgiving tape/player.", "Normal sensitivity.", "Touchy tracking.", "Higher values reveal tracking errors faster.", "Playback-only setting."),
+    "tracking_artifacts": _help("Visibility of tracking-related artifacts.", "Subtle/hidden artifacts.", "Natural VHS instability.", "Strong tearing and crosstalk.", "Scales visual tracking damage.", "Playback-only setting."),
+    "auto_tracking": _help("Consumer-style automatic tracking.", "Off uses manual knob only.", "Partial auto correction.", "On hunts for best lock.", "Can improve stability but may visibly hunt.", "Playback-only setting."),
+    "auto_tracking_strength": _help("Aggressiveness of auto tracking.", "Slow gentle correction.", "Balanced correction.", "Fast, possibly jumpy correction.", "Changes how quickly tracking recenters.", "Playback-only setting."),
+    "servo_recovery": _help("How fast playback lock recovers.", "Slow relock after edits/noise.", "Normal recovery.", "Fast relock.", "Higher values stabilize sooner but can hunt.", "Playback-only setting."),
+    "sync_bias": _help("Bias applied to sync pulse strength.", "Harder to lock.", "Neutral sync behavior.", "Easier to lock.", "Changes vertical/sync stability.", "Playback-only setting."),
+    "servo_hunt": _help("Low-frequency servo hunting amount.", "Stable transport.", "Subtle hunting.", "Visible rolling/wobble.", "Adds mechanical instability.", "Playback-only setting."),
+    "servo_hunt_freq": _help("How often servo hunting appears.", "Rare hunting.", "Intermittent hunting.", "Frequent hunting.", "Controls variation frequency, not strength.", "Playback-only setting."),
+    "head_switch_strength": _help("Bottom-of-frame head switching band strength.", "Minimal band.", "Classic VHS bottom noise.", "Heavy noisy band.", "Adds head-switch disturbance near frame bottom.", "Playback-only setting."),
+    "head_switch_freq": _help("How often head switching noise appears.", "Rare.", "Occasional.", "Frequent.", "Controls event frequency, not band size.", "Playback-only setting."),
+    "playback_timebase": _help("Playback timebase wobble amount.", "Stable geometry.", "Mild horizontal waving.", "Strong warping/flagging.", "Distorts frame geometry during playback.", "Playback-only setting."),
+    "timebase_freq": _help("How often timebase wobble is active.", "Rare wobble.", "Intermittent wobble.", "Frequent wobble.", "Controls variation frequency.", "Playback-only setting."),
+    "playback_rf_noise": _help("Noise introduced while reading tape.", "Cleaner playback.", "Light RF noise.", "Heavy noisy playback.", "Increases snow and signal stress.", "Playback-only setting."),
+    "playback_dropouts": _help("Playback-side signal loss events.", "Few events.", "Occasional dropouts.", "Frequent dropouts.", "Adds read errors without rewriting tape.", "Playback-only setting."),
+    "dropout_freq": _help("How often playback dropouts occur.", "Rare.", "Intermittent.", "Frequent.", "Controls dropout event cadence.", "Playback-only setting."),
+    "interference": _help("External interference amount.", "Clean picture.", "Mild bars/buzz.", "Strong interference.", "Adds moving brightness/noise bands.", "Playback-only setting."),
+    "interference_freq": _help("How often interference is active.", "Rare.", "Intermittent.", "Frequent.", "Controls interference cadence.", "Playback-only setting."),
+    "snow": _help("Visible RF snow amount.", "Clean image.", "Light sparkle.", "Heavy snow.", "Adds crisp analog speckle/noise.", "Playback-only setting."),
+    "snow_freq": _help("How often snow appears.", "Rare bursts.", "Intermittent snow.", "Near-constant snow.", "Controls snow cadence.", "Playback-only setting."),
+    "variance": _help("Randomness of playback instability.", "Predictable effects.", "Natural variation.", "Chaotic variation.", "Changes how much effects fluctuate over time.", "Playback-only setting."),
+    "chroma_shift_x": _help("Horizontal color delay.", "Aligned color.", "Mild color offset.", "Strong color smear/offset.", "Moves chroma relative to luma.", "Playback-only setting."),
+    "chroma_shift_y": _help("Vertical color delay.", "Aligned color.", "Mild vertical offset.", "Strong vertical color misregistration.", "Moves chroma up/down.", "Playback-only setting."),
+    "chroma_phase": _help("Color phase error.", "Accurate hue.", "Mild hue instability.", "Strong hue rotation.", "Shifts VHS color decoding.", "Playback-only setting."),
+    "chroma_noise": _help("Color-channel noise.", "Clean color.", "Mild speckles.", "Heavy color noise.", "Adds noise mainly to chroma.", "Playback-only setting."),
+    "chroma_noise_freq": _help("How often chroma noise appears.", "Rare.", "Intermittent.", "Frequent.", "Controls color-noise cadence.", "Playback-only setting."),
+    "chroma_wobble": _help("Slow color phase/position wobble.", "Stable color.", "Subtle drift.", "Obvious color breathing.", "Animates color instability.", "Playback-only setting."),
+    "chroma_wobble_freq": _help("How often chroma wobble is active.", "Rare.", "Intermittent.", "Frequent.", "Controls wobble cadence.", "Playback-only setting."),
+    "scanline_strength": _help("Dark scanline overlay amount.", "No added scanlines.", "Subtle line texture.", "Strong line pattern.", "Changes preview/export texture.", "Playback-only setting."),
+    "scanline_soften": _help("Vertical blending to soften scanlines.", "Sharper hard lines.", "Balanced blend.", "Smoothest scanlines.", "Reduces harsh interlace appearance.", "Playback-only setting."),
+    "brightness": _help("Playback brightness adjustment.", "Darker image.", "Neutral brightness.", "Brighter image.", "Affects displayed/exported playback image.", "Playback-only setting."),
+    "contrast": _help("Playback contrast adjustment.", "Flatter image.", "Moderate contrast.", "Punchier contrast.", "Changes tonal separation.", "Playback-only setting."),
+    "saturation": _help("Playback color saturation.", "Muted/washed color.", "Normal VHS color.", "Strong saturated color.", "Changes color intensity.", "Playback-only setting."),
+    "bloom": _help("Bright-area glow amount.", "No glow.", "Mild analog bloom.", "Heavy glow/halation.", "Softens bright highlights.", "Playback-only setting."),
+    "sharpen": _help("Playback sharpening amount.", "Soft image.", "Mild edge lift.", "Strong sharpening artifacts.", "Improves apparent detail at risk of ringing.", "Playback-only setting."),
+    "playback_blur": _help("Playback-side blur amount.", "Sharper playback.", "Mild softness.", "Heavy soft playback.", "Softens image without rewriting tape.", "Playback-only setting."),
+    "playback_blur_freq": _help("How often playback blur varies.", "Rare.", "Intermittent.", "Frequent.", "Controls blur cadence.", "Playback-only setting."),
+    "frame_jitter": _help("Whole-frame transport jitter.", "Stable frame.", "Subtle shake.", "Strong frame shake.", "Moves the whole frame slightly.", "Playback-only setting."),
+    "frame_jitter_freq": _help("How often frame jitter appears.", "Rare.", "Intermittent.", "Frequent.", "Controls jitter cadence.", "Playback-only setting."),
+    "composite_view": _help("Adds composite-video style color artifacts.", "Off keeps cleaner separation.", "On adds composite-like crawl/shift.", "Use on for dirtier analog output.", "Changes playback preview/export only.", "Playback-only setting."),
+    "ap_hiss": _help("Playback audio hiss.", "Cleaner playback audio.", "Light hiss.", "Heavy hiss.", "Adds noise while playing/exporting audio.", "Playback-only setting."),
+    "ap_pops": _help("Playback audio pops/clicks.", "Few pops.", "Occasional clicks.", "Frequent pops.", "Adds transient audio defects.", "Playback-only setting."),
+    "play_audio": _help("Enables audio while using the Player.", "Off keeps UI silent.", "On follows tape audio.", "Use on for sync checks.", "Uses Windows audio backend when available.", "Playback-only setting."),
+    "proxy_use": _help("Uses RAM proxy frames for smoother playback.", "Off renders live.", "On uses built proxy when available.", "Use on for heavy effects/tapes.", "Improves smoothness but may be lower fidelity.", "Playback performance setting."),
+    "proxy_seconds": _help("Length of RAM proxy to build.", "Short proxy, low memory.", "Normal preview range.", "Long proxy, high memory/time.", "Affects proxy build time and RAM use.", "Playback performance setting."),
+    "rf_fm_depth": _help("Luma FM deviation depth for RF model.", "Softer/less robust carrier.", "Neutral carrier depth.", "Hotter/more robust carrier.", "Affects RF stability and detail.", "Baked into recording when RF is on."),
+    "rf_am_depth": _help("RF amplitude modulation depth.", "Little envelope ripple.", "Natural RF amplitude movement.", "Strong amplitude instability.", "Adds analog carrier-level variation.", "Baked into recording when RF is on."),
+    "rf_phase_noise": _help("RF phase jitter.", "Stable carrier phase.", "Mild phase noise.", "Strong phase instability.", "Can soften and destabilize detail/color.", "Baked into recording when RF is on."),
+    "rf_carrier_noise": _help("Additional RF carrier noise.", "Clean carrier.", "Moderate noise.", "Noisy carrier.", "Adds carrier-level noise before decode.", "Baked into recording when RF is on."),
+    "rf_nonlinearity": _help("RF saturation/nonlinearity.", "Linear carrier.", "Mild saturation.", "Heavy distortion.", "Adds analog compression/clipping character.", "Baked into recording when RF is on."),
+    "rf_chroma_fc_frac": _help("Chroma subcarrier position as a sample-rate fraction.", "Lower carrier position.", "Default color-under behavior.", "Higher carrier position.", "Changes chroma RF behavior; extremes may look odd.", "Baked into recording when RF is on."),
+    "rf_chroma_lpf": _help("Chroma demodulation low-pass strength.", "More chroma detail/noise.", "Balanced filtering.", "Softer cleaner chroma.", "Trades color detail for stability.", "Baked into recording when RF is on."),
+    "luma_chroma_bleed": _help("Cross-talk between brightness and color.", "Clean separation.", "Mild cross-talk.", "Heavy bleed/dot-crawl feel.", "Adds analog recombination artifacts.", "Playback-only setting."),
+    "rf_playback_model": _help("Applies RF-like channel effects during playback.", "Off uses faster playback path.", "On adds carrier-level read degradation.", "Use on for deeper analog instability.", "Costs CPU and changes playback only.", "Playback-only setting."),
+    "rf_playback_fm_depth": _help("Playback RF luma FM depth.", "Less robust playback carrier.", "Neutral.", "More robust/hotter carrier.", "Changes RF playback degradation.", "Playback-only setting."),
+    "rf_playback_am_depth": _help("Playback RF AM depth.", "Stable amplitude.", "Moderate ripple.", "Strong amplitude instability.", "Changes carrier-level brightness stability.", "Playback-only setting."),
+    "rf_playback_phase_noise": _help("Playback RF phase noise.", "Stable carrier.", "Mild phase jitter.", "Strong phase jitter.", "Destabilizes detail/color during playback.", "Playback-only setting."),
+    "rf_playback_carrier_noise": _help("Playback RF carrier noise.", "Clean read.", "Moderate carrier noise.", "Noisy read.", "Adds RF noise before decode.", "Playback-only setting."),
+    "rf_playback_nonlinearity": _help("Playback RF nonlinearity.", "Linear read path.", "Mild saturation.", "Heavy distortion.", "Adds analog read distortion.", "Playback-only setting."),
+    "live_cam": _help("Camera index used by Live mode.", "First detected camera.", "Choose another capture device.", "Higher indexes are additional devices.", "Affects live input source only.", "Live workflow setting."),
+    "live_bufsec": _help("Length of live ring-buffer tape.", "Lower latency/less buffer.", "Balanced buffer.", "Longer buffer/more memory.", "Controls live tape capacity and memory.", "Live-only setting."),
+    "live_downscale_width": _help("Live input recording width.", "Faster, softer live output.", "Balanced live quality.", "Sharper, higher CPU live output.", "Strongly affects live performance.", "Live-only recording setting."),
+    "live_mode": _help("Turns live VHS processing on.", "Off stops camera processing.", "On starts live pipeline.", "Use with overlay for output.", "Consumes camera and CPU while on.", "Live workflow setting."),
+    "live_overlay": _help("Fullscreen live output window.", "Off keeps output inside app.", "On mirrors live output fullscreen.", "Use for display/capture workflows.", "Does not change recorded signal.", "Live display setting."),
+}
+
+class GradientCanvas(tk.Canvas):
+    def __init__(self, parent, color_a="#071019", color_b="#162536", color_c="#0b0f14", **kwargs):
+        super().__init__(parent, highlightthickness=0, bd=0, **kwargs)
+        self.colors = (color_a, color_b, color_c)
+        self.bind("<Configure>", self._draw)
+
+    @staticmethod
+    def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+        value = value.lstrip("#")
+        return tuple(int(value[i:i+2], 16) for i in (0, 2, 4))
+
+    @staticmethod
+    def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+        return "#%02x%02x%02x" % rgb
+
+    def _draw(self, _evt=None):
+        self.delete("gradient")
+        w = max(1, self.winfo_width())
+        h = max(1, self.winfo_height())
+        a = self._hex_to_rgb(self.colors[0])
+        b = self._hex_to_rgb(self.colors[1])
+        c = self._hex_to_rgb(self.colors[2])
+        for y in range(h):
+            t = y / max(1, h - 1)
+            if t < 0.55:
+                k = t / 0.55
+                rgb = tuple(int(a[i] + (b[i] - a[i]) * k) for i in range(3))
+            else:
+                k = (t - 0.55) / 0.45
+                rgb = tuple(int(b[i] + (c[i] - b[i]) * k) for i in range(3))
+            self.create_line(0, y, w, y, fill=self._rgb_to_hex(rgb), tags=("gradient",))
+        self.lower("gradient")
+
+
+class HelpTooltip:
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self.show, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<FocusIn>", self.show, add="+")
+        widget.bind("<FocusOut>", self.hide, add="+")
+        widget.bind("<Escape>", self.hide, add="+")
+
+    def show(self, _evt=None):
+        if self.tip is not None or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 22
+        y = self.widget.winfo_rooty() + 24
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        self.tip.configure(bg=ACCENT)
+        body = tk.Label(
+            self.tip,
+            text=self.text,
+            justify="left",
+            wraplength=360,
+            bg=TOOLTIP_BG,
+            fg=TEXT,
+            padx=12,
+            pady=10,
+            font=("Segoe UI", 9),
+        )
+        body.pack(padx=1, pady=1)
+
+    def hide(self, _evt=None):
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
+            self.tip = None
+
+
+class PageNavigator:
+    def __init__(self, app):
+        self.app = app
+
+    def select(self, page):
+        self.app._show_page(page)
+
+
+class VScrollFrame(ctk.CTkFrame):
     def __init__(self, parent, width=340, **kwargs):
-        super().__init__(parent, **kwargs)
-        self.canvas = tk.Canvas(self, highlightthickness=0, width=width)
-        self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.vbar.set)
-
-        self.inner = ttk.Frame(self.canvas)
-        self.inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.vbar.pack(side="right", fill="y")
-
-        self.inner.bind("<Configure>", self._on_inner_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-
-        # Scroll wheel support
-        self.canvas.bind("<Enter>", lambda _e: self.canvas.focus_set())
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind("<Button-4>", self._on_mousewheel_linux)
-        self.canvas.bind("<Button-5>", self._on_mousewheel_linux)
-
-    def _on_inner_configure(self, _evt=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _on_canvas_configure(self, _evt=None):
-        self.canvas.itemconfigure(self.inner_id, width=self.canvas.winfo_width())
-
-    def _on_mousewheel(self, evt):
-        delta = -1 * int(evt.delta / 120) if evt.delta else 0
-        if delta:
-            self.canvas.yview_scroll(delta, "units")
-
-    def _on_mousewheel_linux(self, evt):
-        if evt.num == 4:
-            self.canvas.yview_scroll(-1, "units")
-        elif evt.num == 5:
-            self.canvas.yview_scroll(1, "units")
+        super().__init__(parent, fg_color="transparent", corner_radius=0, **kwargs)
+        self.inner = ctk.CTkScrollableFrame(
+            self,
+            width=width,
+            fg_color=CARD_BG,
+            scrollbar_button_color="#26384c",
+            scrollbar_button_hover_color=ACCENT,
+            corner_radius=14,
+        )
+        self.inner.pack(fill="both", expand=True)
 
 class DigitalVCRApp:
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Digital VCR (v6) — tape bundles + nonfreezing UI")
-        self.root.geometry("1120x690")
-        self.root.minsize(980, 560)
+        self.root = ctk.CTk()
+        self.root.title(f"Digital VCR {APP_VERSION}")
+        self.root.geometry("1240x760")
+        self.root.minsize(1080, 640)
+        self.root.configure(bg=DARK_BG)
 
         self.uiq = queue.Queue()
         self.lock = threading.Lock()
@@ -137,9 +318,12 @@ class DigitalVCRApp:
         self._cached_rec_def = self.rec_def
         self._cached_pb_def = self.pb_def
         self._cached_ap_def = self.ap_def
+        self._cached_proxy_use = False
+        self._cached_live_bufsec = 6.0
         # Optional RAM proxy (JPEG frames) for smooth playback
         self._proxy = None
 
+        self._setup_theme()
         self._build_ui()
         self._start_cache_loop()
         self._poll_uiq()
@@ -192,10 +376,18 @@ class DigitalVCRApp:
                         self.edit_status.set(payload)
                 elif kind == "status_play":
                     self.play_status.set(payload)
+                elif kind == "status_live":
+                    if hasattr(self, "live_status"):
+                        self.live_status.set(payload)
                 elif kind == "preview_rec":
                     last_rec = payload
                 elif kind == "preview_edit":
                     last_edit = payload
+                elif kind == "call":
+                    try:
+                        payload()
+                    except Exception:
+                        traceback.print_exc()
         except queue.Empty:
             pass
 
@@ -208,6 +400,51 @@ class DigitalVCRApp:
         delay = 15 if self.uiq.qsize() > 80 else 50
         self.root.after(delay, self._poll_uiq)
 
+
+    def _setup_theme(self):
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        style.configure(".", background=PANEL_BG, foreground=TEXT, fieldbackground=SURFACE_BG)
+        style.configure("TFrame", background=PANEL_BG)
+        style.configure("Root.TFrame", background=DARK_BG)
+        style.configure("Panel.TFrame", background=PANEL_BG)
+        style.configure("Header.TFrame", background=DARK_BG)
+        style.configure("TLabel", background=PANEL_BG, foreground=TEXT)
+        style.configure("Muted.TLabel", background=PANEL_BG, foreground=MUTED)
+        style.configure("HeaderTitle.TLabel", background=DARK_BG, foreground=TEXT, font=("Segoe UI", 15, "bold"))
+        style.configure("HeaderMeta.TLabel", background=DARK_BG, foreground=MUTED, font=("Segoe UI", 9))
+        style.configure("Section.TLabel", background=PANEL_BG, foreground=ACCENT_ACTIVE, font=("Segoe UI", 10, "bold"))
+        style.configure("Status.TLabel", background=PANEL_BG, foreground=MUTED)
+        style.configure("TButton", background=PANEL_BG_2, foreground=TEXT, bordercolor=BORDER, focusthickness=0, padding=(10, 6))
+        style.map("TButton", background=[("active", "#1d2a38"), ("pressed", "#203246")], foreground=[("disabled", "#66717e")])
+        style.configure("Accent.TButton", background=ACCENT, foreground="#07111d", bordercolor=ACCENT, padding=(12, 7))
+        style.map("Accent.TButton", background=[("active", ACCENT_ACTIVE), ("pressed", "#318ce7")])
+        style.configure("TCheckbutton", background=PANEL_BG, foreground=TEXT)
+        style.map("TCheckbutton", background=[("active", PANEL_BG)], foreground=[("disabled", "#66717e")])
+        style.configure("TRadiobutton", background=PANEL_BG, foreground=TEXT)
+        style.configure("TSeparator", background=BORDER)
+        style.configure("TNotebook", background=DARK_BG, borderwidth=0)
+        style.configure("TNotebook.Tab", background="#151d27", foreground=MUTED, padding=(14, 8), borderwidth=0)
+        style.map("TNotebook.Tab", background=[("selected", PANEL_BG), ("active", PANEL_BG_2)], foreground=[("selected", TEXT), ("active", TEXT)])
+        style.configure("TEntry", fieldbackground=SURFACE_BG, foreground=TEXT, insertcolor=TEXT, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
+        style.configure("TCombobox", fieldbackground=SURFACE_BG, background=PANEL_BG_2, foreground=TEXT, arrowcolor=TEXT, bordercolor=BORDER)
+        style.map("TCombobox", fieldbackground=[("readonly", SURFACE_BG)], foreground=[("readonly", TEXT)])
+        style.configure("TSpinbox", fieldbackground=SURFACE_BG, foreground=TEXT, bordercolor=BORDER, arrowsize=12)
+        style.configure("Horizontal.TScale", background=PANEL_BG, troughcolor="#263343", bordercolor=PANEL_BG, lightcolor=PANEL_BG, darkcolor=PANEL_BG)
+        try:
+            self.root.option_add("*Font", "{Segoe UI} 9")
+            self.root.option_add("*TCombobox*Listbox.background", SURFACE_BG)
+            self.root.option_add("*TCombobox*Listbox.foreground", TEXT)
+            self.root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+            self.root.option_add("*TCombobox*Listbox.selectForeground", "#07111d")
+        except Exception:
+            pass
 
 
     def _start_cache_loop(self):
@@ -228,6 +465,14 @@ class DigitalVCRApp:
                 pass
             try:
                 self._cached_live_tape_mode = str(getattr(self, "live_tape_mode_var").get())
+            except Exception:
+                pass
+            try:
+                self._cached_live_bufsec = float(getattr(self, "live_bufsec_var").get())
+            except Exception:
+                pass
+            try:
+                self._cached_proxy_use = bool(getattr(self, "proxy_use_var").get())
             except Exception:
                 pass
         except Exception:
@@ -261,24 +506,173 @@ class DigitalVCRApp:
 
     # ---------- UI ----------
     def _build_ui(self):
-        nb = ttk.Notebook(self.root)
-        self.nb = nb
-        nb.pack(fill="both", expand=True)
-        self.tab_rec = ttk.Frame(nb)
-        self.tab_play = ttk.Frame(nb)
-        self.tab_vhs = ttk.Frame(nb)
-        self.tab_live = ttk.Frame(nb)
-        nb.add(self.tab_rec, text="Recorder")
-        nb.add(self.tab_play, text="Player")
-        nb.add(self.tab_vhs, text="VHS Tape")
-        nb.add(self.tab_live, text="Live")
+        self.gradient = GradientCanvas(self.root, bg=DARK_BG)
+        self.gradient.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        shell = ctk.CTkFrame(self.root, fg_color="transparent", corner_radius=0)
+        shell.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        self.sidebar = ctk.CTkFrame(shell, width=210, fg_color=SIDEBAR_BG, corner_radius=0)
+        self.sidebar.pack(side="left", fill="y")
+        self.content = ctk.CTkFrame(shell, fg_color="transparent", corner_radius=0)
+        self.content.pack(side="left", fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(self.sidebar, text="Digital VCR", font=("Segoe UI", 20, "bold"), text_color=TEXT).pack(anchor="w", padx=18, pady=(20, 2))
+        ctk.CTkLabel(self.sidebar, text=f"{APP_VERSION}", font=("Segoe UI", 11), text_color=MUTED).pack(anchor="w", padx=18, pady=(0, 22))
+
+        self.tab_rec = ctk.CTkFrame(self.content, fg_color="transparent", corner_radius=0)
+        self.tab_play = ctk.CTkFrame(self.content, fg_color="transparent", corner_radius=0)
+        self.tab_vhs = ctk.CTkFrame(self.content, fg_color="transparent", corner_radius=0)
+        self.tab_live = ctk.CTkFrame(self.content, fg_color="transparent", corner_radius=0)
+        self._pages = {
+            "Recorder": self.tab_rec,
+            "Player": self.tab_play,
+            "VHS Tape": self.tab_vhs,
+            "Live": self.tab_live,
+        }
+        self._nav_buttons = {}
+        self.nb = PageNavigator(self)
+        for name, page in self._pages.items():
+            btn = ctk.CTkButton(
+                self.sidebar,
+                text=name,
+                anchor="w",
+                height=40,
+                corner_radius=10,
+                fg_color="transparent",
+                hover_color="#172436",
+                text_color=TEXT,
+                command=lambda p=page: self._show_page(p),
+            )
+            btn.pack(fill="x", padx=12, pady=4)
+            self._nav_buttons[page] = btn
+
+        ctk.CTkLabel(
+            self.sidebar,
+            text="Studio Console\nDark gradient interface\nHover ? for setting help",
+            justify="left",
+            font=("Segoe UI", 10),
+            text_color=MUTED,
+        ).pack(side="bottom", anchor="w", padx=18, pady=18)
+
         self._build_recorder_tab()
         self._build_player_tab()
         self._build_vhs_tab()
         self._build_live_tab()
+        self._show_page(self.tab_rec)
+
+    def _show_page(self, page):
+        for pg in getattr(self, "_pages", {}).values():
+            pg.pack_forget()
+        page.pack(fill="both", expand=True)
+        for pg, btn in getattr(self, "_nav_buttons", {}).items():
+            if pg is page:
+                btn.configure(fg_color="#1f6aa5", text_color="#ffffff")
+            else:
+                btn.configure(fg_color="transparent", text_color=TEXT)
+
+    def _help_text(self, name: str, label: str, key: str | None = None) -> str:
+        candidates = []
+        if key:
+            candidates.append(f"{key}_{name}")
+        candidates.append(name)
+        for cand in candidates:
+            if cand in SETTING_HELP:
+                return SETTING_HELP[cand]
+        return _help(
+            f"Controls {label}.",
+            "Lower values reduce the effect.",
+            "Middle values are balanced.",
+            "Higher values increase the effect.",
+            "Changes the current tape workflow or output as labeled.",
+            "UI setting.",
+        )
+
+    def _help_button(self, parent, name: str, label: str, key: str | None = None):
+        btn = ctk.CTkButton(
+            parent,
+            text="?",
+            width=24,
+            height=24,
+            corner_radius=12,
+            fg_color="#233448",
+            hover_color=ACCENT,
+            text_color=TEXT,
+            font=("Segoe UI", 11, "bold"),
+        )
+        HelpTooltip(btn, self._help_text(name, label, key))
+        return btn
+
+    def _section_title(self, parent, text: str):
+        ctk.CTkLabel(parent, text=text, text_color=ACCENT_ACTIVE, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(14, 6))
+
+    def _setting_header(self, parent, label: str, help_key: str, key: str | None = None, value_text: str | None = None):
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(anchor="w", fill="x", pady=(7, 1))
+        ctk.CTkLabel(row, text=label, text_color=TEXT, font=("Segoe UI", 10, "bold")).pack(side="left")
+        self._help_button(row, help_key, label, key).pack(side="left", padx=(7, 0))
+        val_lbl = ctk.CTkLabel(row, text=value_text or "", text_color=MUTED, font=("Segoe UI", 10))
+        val_lbl.pack(side="right")
+        return val_lbl
+
+    def _button(self, parent, text: str, command, *, accent: bool = False, width: int | None = None):
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            width=width or 120,
+            height=34,
+            corner_radius=10,
+            fg_color=ACCENT if accent else CARD_BG_2,
+            hover_color=ACCENT_ACTIVE if accent else "#223247",
+            text_color="#07111d" if accent else TEXT,
+        )
+
+    def _setting_switch(self, parent, label: str, variable, help_key: str):
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(anchor="w", fill="x", pady=5)
+        sw = ctk.CTkSwitch(
+            row,
+            text=label,
+            variable=variable,
+            progress_color=ACCENT,
+            button_color="#d8e8ff",
+            fg_color="#2b3848",
+            text_color=TEXT,
+        )
+        sw.pack(side="left")
+        self._help_button(row, help_key, label).pack(side="left", padx=(8, 0))
+        return sw
+
+    def _setting_combo(self, parent, label: str, variable, values, help_key: str, width: int = 130):
+        self._setting_header(parent, label, help_key)
+        combo = ctk.CTkComboBox(
+            parent,
+            values=list(values),
+            variable=variable,
+            width=width,
+            fg_color=SURFACE_BG,
+            border_color=BORDER,
+            button_color=CARD_BG_2,
+            button_hover_color=ACCENT,
+            dropdown_fg_color=SURFACE_BG,
+            dropdown_hover_color="#223247",
+            text_color=TEXT,
+            dropdown_text_color=TEXT,
+        )
+        combo.pack(anchor="w", pady=(0, 5))
+        return combo
+
+    def _setting_entry(self, parent, label: str, variable, help_key: str, width: int = 120):
+        self._setting_header(parent, label, help_key)
+        entry = ctk.CTkEntry(parent, textvariable=variable, width=width, fg_color=SURFACE_BG, border_color=BORDER, text_color=TEXT)
+        entry.pack(anchor="w", pady=(0, 5))
+        return entry
 
     def _slider(self, parent, label, name, frm, to, key: str):
-        ttk.Label(parent, text=label).pack(anchor="w")
+        return self._setting_slider(parent, label, name, frm, to, key)
+
+    def _setting_slider(self, parent, label, name, frm, to, key: str, help_key: str | None = None):
         if key == "rec":
             init = float(getattr(self.rec_def, name))
             existing = getattr(self, f"var_rec_{name}", None)
@@ -304,21 +698,16 @@ class DigitalVCRApp:
             existing = getattr(self, f"var_ap_{name}", None)
             var = existing if existing is not None else tk.DoubleVar(value=init)
             setattr(self, f"var_ap_{name}", var)
-        row = ttk.Frame(parent)
-        row.pack(anchor="w", fill="x")
-        # Move the label into the row (left) and add a live value readout (right)
-        # Note: we already created a label above; keep it for layout stability on older saved UIs.
-        val_lbl = ttk.Label(row, text="")
-        val_lbl.pack(side="right")
-        scale = ttk.Scale(parent, from_=frm, to=to, variable=var, orient="horizontal")
-        scale.pack(anchor="w", fill="x", pady=(0,6))
+        val_lbl = self._setting_header(parent, label, help_key or name, key)
+        scale = ctk.CTkSlider(parent, from_=frm, to=to, variable=var, progress_color=ACCENT, button_color=ACCENT_ACTIVE, button_hover_color="#9ccdff")
+        scale.pack(anchor="w", fill="x", pady=(0, 6))
 
         def _fmt_value():
             v = float(var.get())
             rng = float(to - frm) if float(to - frm) != 0.0 else 1.0
             pct = (v - float(frm)) / rng
             pct = max(0.0, min(1.0, pct))
-            val_lbl.config(text=f"{v:.3f}  ({pct*100:.0f}%)")
+            val_lbl.configure(text=f"{v:.3f}  ({pct*100:.0f}%)")
 
         try:
             var.trace_add("write", lambda *args: _fmt_value())
@@ -352,8 +741,7 @@ class DigitalVCRApp:
                     self._record_pos = 0
                     # jump editor preview to first recorded track
                     self._preview_pos = int(sorted(tape.cart.tracks.keys())[0]) if tape.cart.tracks else 0
-                self._update_scrub_range()
-                self.recpos_var.set("0")
+                self._q("call", lambda settings=settings: (self._apply_settings_dict_to_ui(settings), self._update_scrub_range(), self.recpos_var.set("0"), self.scrub_var.set(0)))
                 self._q("status_rec", f"Loaded bundle. Tracks={tape.cart.recorded_count()} len={tape.cart.length_tracks}")
                 self._q("status_edit", "Loaded bundle into Editor.")
                 self._q("status_play", "Loaded bundle. Insert → Play.")
@@ -415,78 +803,70 @@ class DigitalVCRApp:
     # -------- Recorder tab --------
     def _build_recorder_tab(self):
         left_sf = VScrollFrame(self.tab_rec, width=410)
-        right = ttk.Frame(self.tab_rec)
-        left_sf.pack(side="left", fill="y", padx=10, pady=10)
-        right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+        right = ctk.CTkFrame(self.tab_rec, fg_color=CARD_BG, corner_radius=16)
+        left_sf.pack(side="left", fill="y", padx=(0, 14), pady=0)
+        right.pack(side="right", fill="both", expand=True, padx=0, pady=0)
         left = left_sf.inner
 
-        ttk.Button(left, text="Load tape bundle folder…", command=self._load_bundle_async).pack(anchor="w", pady=(0,6))
-        ttk.Button(left, text="Go to Player tab (final playback + export)", command=lambda: self.nb.select(self.tab_play)).pack(anchor="w", pady=(0,6))
-        ttk.Button(left, text="Use memory (no disk)", command=self._use_memory).pack(anchor="w", pady=(0,6))
+        self._section_title(left, "Recorder")
+        self._button(left, "Load tape bundle folder...", self._load_bundle_async).pack(anchor="w", fill="x", pady=(0,6))
+        self._button(left, "Go to Player tab", lambda: self.nb.select(self.tab_play)).pack(anchor="w", fill="x", pady=(0,6))
+        self._button(left, "Use memory (no disk)", self._use_memory).pack(anchor="w", fill="x", pady=(0,6))
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
+        self._section_title(left, "Tape")
 
-        ttk.Label(left, text="Tape base folder").pack(anchor="w")
         self.base_dir_var = tk.StringVar(value=str(Path.cwd() / "tapes"))
-        rowb = ttk.Frame(left); rowb.pack(fill="x", pady=4)
-        ttk.Entry(rowb, textvariable=self.base_dir_var, width=36).pack(side="left", padx=(0,6))
-        ttk.Button(rowb, text="Browse…", command=self._browse_base_dir).pack(side="left")
+        self._setting_header(left, "Tape base folder", "base_dir")
+        rowb = ctk.CTkFrame(left, fg_color="transparent"); rowb.pack(fill="x", pady=4)
+        ctk.CTkEntry(rowb, textvariable=self.base_dir_var, width=250, fg_color=SURFACE_BG, border_color=BORDER, text_color=TEXT).pack(side="left", padx=(0,6), fill="x", expand=True)
+        self._button(rowb, "Browse...", self._browse_base_dir, width=86).pack(side="left")
 
-        ttk.Label(left, text="Blank tape").pack(anchor="w")
         self.tape_minutes = tk.IntVar(value=5)
-        row = ttk.Frame(left); row.pack(fill="x", pady=4)
-        ttk.Label(row, text="Length (min)").pack(side="left")
-        ttk.Entry(row, textvariable=self.tape_minutes, width=6).pack(side="left", padx=6)
-        ttk.Button(row, text="New tape (create in base folder)", command=self._new_bundle_blank_tape).pack(side="left")
+        self._setting_entry(left, "Blank tape length (min)", self.tape_minutes, "tape_minutes", width=90)
+        self._button(left, "New tape (create in base folder)", self._new_bundle_blank_tape, accent=True).pack(anchor="w", fill="x", pady=(0, 6))
 
-        ttk.Label(left, text="Record position").pack(anchor="w", pady=(8,0))
         self.recpos_var = tk.StringVar(value="0")
-        row2 = ttk.Frame(left); row2.pack(fill="x", pady=4)
-        ttk.Label(row2, text="Track idx").pack(side="left")
-        ttk.Entry(row2, textvariable=self.recpos_var, width=10).pack(side="left", padx=6)
-        ttk.Button(row2, text="Set", command=self._set_record_pos).pack(side="left")
-        ttk.Button(row2, text="Rewind", command=lambda: self._set_record_pos_value(0)).pack(side="left", padx=4)
+        self._setting_header(left, "Record position", "recpos")
+        row2 = ctk.CTkFrame(left, fg_color="transparent"); row2.pack(fill="x", pady=4)
+        ctk.CTkEntry(row2, textvariable=self.recpos_var, width=100, fg_color=SURFACE_BG, border_color=BORDER, text_color=TEXT).pack(side="left", padx=(0,6))
+        self._button(row2, "Set", self._set_record_pos, width=62).pack(side="left")
+        self._button(row2, "Rewind", lambda: self._set_record_pos_value(0), width=82).pack(side="left", padx=4)
 
-        ttk.Label(left, text="Scrub tape to find location (nonfreezing)").pack(anchor="w", pady=(10,0))
         self.scrub_var = tk.IntVar(value=0)
-        self.scrub_scale = ttk.Scale(left, from_=0, to=1000, variable=self.scrub_var, orient="horizontal", command=self._on_scrub)
+        self._setting_header(left, "Scrub tape location", "scrub")
+        self.scrub_scale = ctk.CTkSlider(left, from_=0, to=1000, variable=self.scrub_var, command=self._on_scrub, progress_color=ACCENT, button_color=ACCENT_ACTIVE)
         self.scrub_scale.pack(anchor="w", fill="x", pady=(0,4))
         self.scrub_lbl = tk.StringVar(value="0 / 0 tracks")
-        ttk.Label(left, textvariable=self.scrub_lbl).pack(anchor="w")
+        ctk.CTkLabel(left, textvariable=self.scrub_lbl, text_color=MUTED).pack(anchor="w")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
+        self._section_title(left, "Source")
 
         self.src_var = tk.StringVar(value="")
-        ttk.Label(left, text="Source file (record/overwrite from record position)").pack(anchor="w")
-        ttk.Entry(left, textvariable=self.src_var, width=52).pack(anchor="w", pady=4)
-        ttk.Button(left, text="Browse…", command=self._browse_source).pack(anchor="w")
+        self._setting_header(left, "Source file", "source_file")
+        ctk.CTkEntry(left, textvariable=self.src_var, width=340, fg_color=SURFACE_BG, border_color=BORDER, text_color=TEXT).pack(anchor="w", fill="x", pady=4)
+        self._button(left, "Browse...", self._browse_source).pack(anchor="w", fill="x")
 
-        ttk.Label(left, text="Record monitor").pack(anchor="w", pady=(8,0))
         self.monitor_var = tk.StringVar(value="tape")
-        ttk.Combobox(left, values=["tape","input"], textvariable=self.monitor_var, width=10, state="readonly").pack(anchor="w")
+        self._setting_combo(left, "Record monitor", self.monitor_var, ["tape","input"], "monitor_mode", width=130)
 
-        ttk.Label(left, text="Downscale width").pack(anchor="w", pady=(8,0))
         self.down_w = tk.IntVar(value=self.rec_opts.downscale_width)
-        ttk.Scale(left, from_=200, to=720, variable=self.down_w, orient="horizontal").pack(anchor="w", fill="x")
+        self._setting_header(left, "Downscale width", "downscale_width")
+        ctk.CTkSlider(left, from_=200, to=720, variable=self.down_w, progress_color=ACCENT, button_color=ACCENT_ACTIVE).pack(anchor="w", fill="x")
 
-        ttk.Label(left, text="Field sampling").pack(anchor="w", pady=(8,0))
         self.sampling_var = tk.StringVar(value=getattr(self.rec_opts, "field_sampling", "progressive"))
-        ttk.Combobox(left, values=["progressive","interlaced"], textvariable=self.sampling_var, width=16, state="readonly").pack(anchor="w")
+        self._setting_combo(left, "Field sampling", self.sampling_var, ["progressive","interlaced"], "field_sampling", width=160)
 
-        ttk.Label(left, text="Encode threads (0=auto)").pack(anchor="w", pady=(8,0))
         self.encode_threads_var = tk.IntVar(value=int(getattr(self.rec_opts, 'encode_threads', 0)))
-        rowt = ttk.Frame(left); rowt.pack(anchor="w", fill="x", pady=4)
-        ttk.Spinbox(rowt, from_=0, to=16, textvariable=self.encode_threads_var, width=6).pack(side="left")
-        ttk.Label(rowt, text="  (More threads = faster encode; uses CPU)").pack(side="left")
+        self._setting_entry(left, "Encode threads (0=auto)", self.encode_threads_var, "encode_threads", width=90)
 
         # Real RF modulation (FM+AM carrier round-trip)
         self.real_rf_var = tk.BooleanVar(value=bool(getattr(self.rec_def, 'real_rf_modulation', False)))
-        ttk.Checkbutton(left, text="Real RF modulation (FM+AM)", variable=self.real_rf_var).pack(anchor="w", pady=4)
+        self._setting_switch(left, "Real RF modulation (FM+AM)", self.real_rf_var, "real_rf_modulation")
 
-        ttk.Label(left, text="Tape mode (baked quality)").pack(anchor="w", pady=(8,0))
         self.rec_mode = tk.StringVar(value=self.rec_def.tape_mode)
-        ttk.Combobox(left, values=["SP","LP","EP"], textvariable=self.rec_mode, width=8, state="readonly").pack(anchor="w")
+        self._setting_combo(left, "Tape mode (baked quality)", self.rec_mode, ["SP","LP","EP"], "tape_mode", width=110)
 
+        self._section_title(left, "Record Defects")
         self._slider(left, "Luma bandwidth", "luma_bw", 0.35, 1.0, key="rec")
         self._slider(left, "Chroma bandwidth", "chroma_bw", 0.20, 1.0, key="rec")
         self._slider(left, "Record blur", "record_blur", 0.0, 1.0, key="rec")
@@ -494,28 +874,27 @@ class DigitalVCRApp:
         self._slider(left, "Record RF noise", "record_rf_noise", 0.0, 0.15, key="rec")
         self._slider(left, "Record dropouts", "record_dropouts", 0.0, 0.10, key="rec")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Label(left, text="Audio (baked if ffmpeg available)").pack(anchor="w")
+        self._section_title(left, "Audio (baked if ffmpeg available)")
         self._slider(left, "Audio wow/flutter", "wow", 0.0, 1.0, key="ar")
         self._slider(left, "Audio hiss", "hiss", 0.0, 1.0, key="ar")
         self._slider(left, "Audio dropouts", "dropouts", 0.0, 0.25, key="ar")
         self._slider(left, "Audio compression", "compression", 0.0, 1.0, key="ar")
 
         self.rt_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(left, text="Enforce real-time record", variable=self.rt_var).pack(anchor="w", pady=6)
+        self._setting_switch(left, "Enforce real-time record", self.rt_var, "rt_record")
 
         self.audio_extract_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(left, text="Extract audio (ffmpeg)", variable=self.audio_extract_var).pack(anchor="w", pady=2)
+        self._setting_switch(left, "Extract audio (ffmpeg)", self.audio_extract_var, "audio_extract")
 
         self.autosave_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(left, text="Auto-save bundle after record (if using bundle)", variable=self.autosave_var).pack(anchor="w", pady=2)
+        self._setting_switch(left, "Auto-save bundle after record", self.autosave_var, "autosave")
 
-        ttk.Button(left, text="Record (overwrite)", command=self._record).pack(anchor="w", pady=(10,4))
+        self._button(left, "Record (overwrite)", self._record, accent=True).pack(anchor="w", fill="x", pady=(14,4))
 
         self.rec_status = tk.StringVar(value="Idle.")
-        ttk.Label(left, textvariable=self.rec_status, wraplength=390).pack(anchor="w", pady=(10,0))
+        ctk.CTkLabel(left, textvariable=self.rec_status, wraplength=390, text_color=MUTED, justify="left").pack(anchor="w", pady=(10,0))
 
-        self.rec_canvas = tk.Label(right, text="Live record monitor / scrub preview", background="#111", foreground="#ddd")
+        self.rec_canvas = tk.Label(right, text="Live record monitor / scrub preview", background="#05070a", foreground=MUTED, bd=1, relief="solid", highlightbackground=BORDER)
         self.rec_canvas.pack(fill="both", expand=True)
 
         self._update_scrub_range()
@@ -525,6 +904,7 @@ class DigitalVCRApp:
             tape = self._active_tape()
             mx = max(2, int(tape.cart.length_tracks-2))
         try:
+            self._scrub_max = mx
             self.scrub_scale.configure(to=mx)
             self.scrub_lbl.set(f"{int(self.scrub_var.get())} / {mx} tracks")
         except Exception:
@@ -532,7 +912,7 @@ class DigitalVCRApp:
 
     def _on_scrub(self, _val=None):
         v = int(self.scrub_var.get())
-        self.scrub_lbl.set(f"{v} / {int(float(self.scrub_scale.cget('to')))} tracks")
+        self.scrub_lbl.set(f"{v} / {int(getattr(self, '_scrub_max', 1000))} tracks")
         self._scrub_req = v  # worker picks latest; no UI-thread decode
 
     def _scrub_worker_loop(self):
@@ -652,6 +1032,9 @@ class DigitalVCRApp:
             return
         self._sync_rec_def()
         monitor = self.monitor_var.get()
+        autosave_on = bool(self.autosave_var.get())
+        rec_def_for_save, pb_def_for_save, ap_def_for_save = self._sync_edit_defects()
+        settings_for_save = settings_to_dict(rec_def_for_save, pb_def_for_save, self.ar_def, ap_def_for_save)
 
         def worker():
             self._q("status_rec", "Recording…")
@@ -671,8 +1054,7 @@ class DigitalVCRApp:
                 return
             with self.lock:
                 self._record_pos = endpos
-            self.recpos_var.set(str(endpos))
-            self.scrub_var.set(endpos)
+            self._q("call", lambda: (self.recpos_var.set(str(endpos)), self.scrub_var.set(endpos), self._update_scrub_range()))
 
             msg = f"Done. Recorded up to track={endpos} | Stored tracks={tape.cart.recorded_count()}"
             if self.recorder.last_audio_error:
@@ -681,11 +1063,9 @@ class DigitalVCRApp:
                 msg += " | Audio: extracted"
 
             # Auto-save if we have a bundle folder
-            if bundle and bool(self.autosave_var.get()):
+            if bundle and autosave_on:
                 try:
-                    rec_def, pb_def, ap_def = self._sync_edit_defects()
-                    settings = settings_to_dict(rec_def, pb_def, self.ar_def, ap_def)
-                    save_bundle(bundle, tape, settings)
+                    save_bundle(bundle, tape, settings_for_save)
                     msg += " | Auto-saved bundle"
                 except Exception as e:
                     msg += f" | Auto-save failed: {e}"
@@ -745,7 +1125,7 @@ class DigitalVCRApp:
         self.edit_status = tk.StringVar(value="Enable Live Preview for real-time updates.")
         ttk.Label(left, textvariable=self.edit_status, wraplength=430).pack(anchor="w", pady=(10,0))
 
-        self.edit_canvas = tk.Label(right, text="Editor preview", background="#111", foreground="#ddd")
+        self.edit_canvas = tk.Label(right, text="Editor preview", background="#05070a", foreground=MUTED, bd=1, relief="solid", highlightbackground=BORDER)
         self.edit_canvas.pack(fill="both", expand=True)
 
     def _toggle_live_preview(self):
@@ -904,6 +1284,8 @@ class DigitalVCRApp:
             return
 
         rec_def, pb_def, ap_def = self._sync_edit_defects()
+        dub_realtime = bool(self.dub_rt.get()) if hasattr(self, "dub_rt") else False
+        export_video = bool(self.export_video_var.get()) if hasattr(self, "export_video_var") else True
 
         # Prefer current bundle folder if present; otherwise ask
         folder = bundle
@@ -917,7 +1299,7 @@ class DigitalVCRApp:
             self._q("status_edit", "Dubbing / re-recording…")
             out_tape = self.editor.dub_rerecord(
                 tape, rec_def,
-                DubOptions(enforce_real_time=bool(self.dub_rt.get())),
+                DubOptions(enforce_real_time=dub_realtime),
                 progress_cb=lambda a,b: self._q("status_edit", f"Dubbing… {a}/{b}"),
                 preview_cb=lambda fr: self._q("preview_edit", fr)
             )
@@ -929,7 +1311,7 @@ class DigitalVCRApp:
             settings = settings_to_dict(rec_def, pb_def, self.ar_def, ap_def)
             save_bundle(folder, out_tape, settings)
 
-            if not bool(self.export_video_var.get()):
+            if not export_video:
                 self._q("status_edit", f"Saved bundle (no video export): {folder}")
                 return
 
@@ -961,52 +1343,48 @@ class DigitalVCRApp:
     
     def _build_live_tab(self):
         left_sf = VScrollFrame(self.tab_live, width=410)
-        right = ttk.Frame(self.tab_live)
-        left_sf.pack(side="left", fill="y", padx=10, pady=10)
-        right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+        right = ctk.CTkFrame(self.tab_live, fg_color=CARD_BG, corner_radius=16)
+        left_sf.pack(side="left", fill="y", padx=(0, 14), pady=0)
+        right.pack(side="right", fill="both", expand=True, padx=0, pady=0)
         left = left_sf.inner
 
-        ttk.Label(left, text="Live mode (camera input → VHS pipeline → preview)").pack(anchor="w")
-        ttk.Label(left, text="Live uses the same Recorder/Player sliders. You can tweak them while live is running.").pack(anchor="w", pady=(0,8))
+        self._section_title(left, "Live Mode")
+        ctk.CTkLabel(left, text="Camera input -> VHS pipeline -> preview", text_color=MUTED).pack(anchor="w", pady=(0,8))
 
-        ttk.Label(left, text="Camera index").pack(anchor="w")
-        self.live_cam_var = tk.IntVar(value=int(getattr(self, "_live_cam_index", 0)))
-        cam_row = ttk.Frame(left); cam_row.pack(anchor="w", fill="x", pady=4)
-        self.live_cam_combo = ttk.Combobox(cam_row, width=10, state="readonly")
+        self.live_cam_var = tk.StringVar(value=str(int(getattr(self, "_live_cam_index", 0))))
+        self._setting_header(left, "Camera index", "live_cam")
+        cam_row = ctk.CTkFrame(left, fg_color="transparent"); cam_row.pack(anchor="w", fill="x", pady=4)
+        self.live_cam_combo = ctk.CTkComboBox(cam_row, width=110, values=["0"], variable=self.live_cam_var, fg_color=SURFACE_BG, border_color=BORDER, button_color=CARD_BG_2, text_color=TEXT)
         self.live_cam_combo.pack(side="left", padx=(0,6))
-        ttk.Button(cam_row, text="Refresh", command=self._refresh_cameras).pack(side="left")
+        self._button(cam_row, "Refresh", self._refresh_cameras, width=92).pack(side="left")
         self._refresh_cameras()
 
         self.live_bufsec_var = tk.DoubleVar(value=6.0)
-        ttk.Label(left, text="Live tape buffer (seconds)").pack(anchor="w")
-        ttk.Scale(left, from_=2.0, to=20.0, variable=self.live_bufsec_var, orient="horizontal").pack(anchor="w", fill="x", pady=(0,8))
-        ttk.Label(left, text="Live tape speed / mode (quality)").pack(anchor="w")
+        self._setting_header(left, "Live tape buffer (seconds)", "live_bufsec")
+        ctk.CTkSlider(left, from_=2.0, to=20.0, variable=self.live_bufsec_var, progress_color=ACCENT, button_color=ACCENT_ACTIVE).pack(anchor="w", fill="x", pady=(0,8))
         self.live_tape_mode_var = tk.StringVar(value="SP")
-        ttk.Combobox(left, values=["SP","LP","EP"], textvariable=self.live_tape_mode_var, width=8, state="readonly").pack(anchor="w", pady=(0,8))
+        self._setting_combo(left, "Live tape speed / mode", self.live_tape_mode_var, ["SP","LP","EP"], "tape_mode", width=110)
 
 
         self.live_toggle_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="Live mode ON", variable=self.live_toggle_var, command=self._toggle_live).pack(anchor="w", pady=4)
+        live_sw = self._setting_switch(left, "Live mode ON", self.live_toggle_var, "live_mode")
+        live_sw.configure(command=self._toggle_live)
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-
-        # Overlay output window (fullscreen)
         self.live_overlay_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="Overlay fullscreen output", variable=self.live_overlay_var,
-                        command=self._toggle_live_overlay).pack(anchor="w", pady=2)
-        ttk.Label(left, text="Tip: Press ESC to close overlay.").pack(anchor="w", pady=(0,8))
+        overlay_sw = self._setting_switch(left, "Overlay fullscreen output", self.live_overlay_var, "live_overlay")
+        overlay_sw.configure(command=self._toggle_live_overlay)
+        ctk.CTkLabel(left, text="Tip: Press ESC to close overlay.", text_color=MUTED).pack(anchor="w", pady=(0,8))
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Live controls (recording)").pack(anchor="w")
+        self._section_title(left, "Live Controls (Recording)")
         # Live preview downscale (controls the record-side horizontal resolution)
         self.var_live_downscale_width = tk.IntVar(value=640)
-        row = ttk.Frame(left)
+        row = ctk.CTkFrame(left, fg_color="transparent")
         row.pack(fill="x", pady=2)
-        ttk.Label(row, text="Downscale width (px)").pack(side="left")
-        ttk.Label(row, textvariable=self.var_live_downscale_width).pack(side="right")
-        tk.Scale(left, from_=240, to=960, resolution=10, orient="horizontal", showvalue=False,
-                 variable=self.var_live_downscale_width, length=320).pack(fill="x")
-        ttk.Label(left, text="(Higher = sharper/less compressed live preview)").pack(anchor="w", pady=(0,4))
+        ctk.CTkLabel(row, text="Downscale width (px)", text_color=TEXT, font=("Segoe UI", 10, "bold")).pack(side="left")
+        self._help_button(row, "live_downscale_width", "Downscale width (px)").pack(side="left", padx=(7, 0))
+        ctk.CTkLabel(row, textvariable=self.var_live_downscale_width, text_color=MUTED).pack(side="right")
+        ctk.CTkSlider(left, from_=240, to=960, variable=self.var_live_downscale_width, progress_color=ACCENT, button_color=ACCENT_ACTIVE).pack(fill="x")
+        ctk.CTkLabel(left, text="Higher = sharper, more CPU.", text_color=MUTED).pack(anchor="w", pady=(0,4))
 
         # Video record-side sliders
         self._slider(left, "Luma bandwidth", "luma_bw", 0.35, 1.0, key="rec")
@@ -1015,8 +1393,7 @@ class DigitalVCRApp:
         self._slider(left, "Record RF noise", "record_rf_noise", 0.0, 0.15, key="rec")
         self._slider(left, "Record dropouts", "record_dropouts", 0.0, 0.10, key="rec")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Live controls (audio record)").pack(anchor="w")
+        self._section_title(left, "Live Controls (Audio Record)")
 
         # Audio record-side sliders
         self._slider(left, "Audio wow/flutter", "wow", 0.0, 1.0, key="ar")
@@ -1024,8 +1401,7 @@ class DigitalVCRApp:
         self._slider(left, "Audio dropouts", "dropouts", 0.0, 0.25, key="ar")
         self._slider(left, "Audio compression", "compression", 0.0, 1.0, key="ar")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Live controls (playback / tracking)").pack(anchor="w")
+        self._section_title(left, "Live Controls (Playback / Tracking)")
 
         # Playback-side sliders (same as Player tab)
         self._slider(left, "Tracking knob", "tracking_knob", 0.0, 1.0, key="pb")
@@ -1070,20 +1446,18 @@ class DigitalVCRApp:
         self._slider(left, "Frame jitter", "frame_jitter", 0.0, 1.0, key="pb")
         self._slider(left, "Jitter frequency", "frame_jitter_freq", 0.0, 1.0, key="pb")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Live controls (audio playback)").pack(anchor="w")
+        self._section_title(left, "Live Controls (Audio Playback)")
         self._slider(left, "Audio hiss", "hiss", 0.0, 1.0, key="ap")
         self._slider(left, "Audio pops", "pops", 0.0, 1.0, key="ap")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Quick access").pack(anchor="w")
-        ttk.Button(left, text="Go to Recorder tab", command=lambda: self.nb.select(self.tab_rec)).pack(anchor="w", pady=2)
-        ttk.Button(left, text="Go to Player tab", command=lambda: self.nb.select(self.tab_play)).pack(anchor="w", pady=2)
+        self._section_title(left, "Quick Access")
+        self._button(left, "Go to Recorder", lambda: self.nb.select(self.tab_rec)).pack(anchor="w", fill="x", pady=2)
+        self._button(left, "Go to Player", lambda: self.nb.select(self.tab_play)).pack(anchor="w", fill="x", pady=2)
 
         self.live_status = tk.StringVar(value="Select a camera, then enable Live mode.")
-        ttk.Label(left, textvariable=self.live_status, wraplength=360).pack(anchor="w", pady=(12,0))
+        ctk.CTkLabel(left, textvariable=self.live_status, wraplength=360, text_color=MUTED, justify="left").pack(anchor="w", pady=(12,0))
 
-        self.live_canvas = tk.Label(right, text="Live output", background="#111", foreground="#ddd")
+        self.live_canvas = tk.Label(right, text="Live output", background="#05070a", foreground=MUTED, bd=1, relief="solid", highlightbackground=BORDER)
         self.live_canvas.pack(fill="both", expand=True)
 
         # Hotkey: F11 toggles overlay
@@ -1096,39 +1470,68 @@ class DigitalVCRApp:
 
     def _refresh_cameras(self):
         avail = []
-        for i in range(0, 8):
-            cap = None
+        old_log_level = None
+        try:
+            if hasattr(cv2, "getLogLevel") and hasattr(cv2, "setLogLevel"):
+                old_log_level = cv2.getLogLevel()
+                cv2.setLogLevel(0)
+        except Exception:
+            old_log_level = None
+        try:
+            for i in range(0, 8):
+                cap = None
+                try:
+                    cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                    if cap is not None and cap.isOpened():
+                        avail.append(i)
+                except Exception:
+                    pass
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+        finally:
             try:
-                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-                if cap is not None and cap.isOpened():
-                    avail.append(i)
-            except Exception:
-                pass
-            try:
-                if cap is not None:
-                    cap.release()
+                if old_log_level is not None:
+                    cv2.setLogLevel(old_log_level)
             except Exception:
                 pass
         if not avail:
             avail = [0]
-        self.live_cam_combo["values"] = [str(i) for i in avail]
+        values = [str(i) for i in avail]
+        self.live_cam_combo.configure(values=values)
         cur = str(self.live_cam_var.get()) if hasattr(self, "live_cam_var") else str(avail[0])
-        if cur not in self.live_cam_combo["values"]:
+        if cur not in values:
             cur = str(avail[0])
         self.live_cam_combo.set(cur)
         try:
-            self.live_cam_var.set(int(cur))
+            self.live_cam_var.set(str(cur))
         except Exception:
             pass
-        self.live_cam_combo.bind("<<ComboboxSelected>>", lambda _e: self.live_cam_var.set(int(self.live_cam_combo.get())))
+        self.live_cam_combo.configure(command=lambda value: self.live_cam_var.set(str(value)))
 
     def _toggle_live(self):
         try:
             on = bool(self.live_toggle_var.get())
         except Exception:
             on = False
+        try:
+            self._live_cam_index = int(self.live_cam_var.get())
+        except Exception:
+            pass
+        try:
+            self._cached_live_bufsec = float(self.live_bufsec_var.get())
+        except Exception:
+            pass
         self._live_on = on
+        old_cap = self._live_cap
         self._live_cap = None
+        if not on and old_cap is not None:
+            try:
+                old_cap.release()
+            except Exception:
+                pass
         if on:
             try:
                 self.live_status.set("Live mode: starting…")
@@ -1215,10 +1618,7 @@ class DigitalVCRApp:
 
                 # Open/reopen capture if needed
                 if self._live_cap is None:
-                    try:
-                        cam_idx = int(self.live_cam_var.get())
-                    except Exception:
-                        cam_idx = int(getattr(self, "_live_cam_index", 0))
+                    cam_idx = int(getattr(self, "_live_cam_index", 0))
                     self._live_cam_index = cam_idx
 
                     cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW)
@@ -1235,7 +1635,7 @@ class DigitalVCRApp:
 
                     # Create ring tape buffer
                     try:
-                        bufsec = float(self.live_bufsec_var.get())
+                        bufsec = float(getattr(self, "_cached_live_bufsec", 6.0))
                     except Exception:
                         bufsec = 6.0
                     length_tracks = int(max(180, min(2400, bufsec*60.0))) + 8
@@ -1501,32 +1901,31 @@ class DigitalVCRApp:
 
     def _build_player_tab(self):
         left_sf = VScrollFrame(self.tab_play, width=390)
-        right = ttk.Frame(self.tab_play)
-        left_sf.pack(side="left", fill="y", padx=10, pady=10)
-        right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+        right = ctk.CTkFrame(self.tab_play, fg_color=CARD_BG, corner_radius=16)
+        left_sf.pack(side="left", fill="y", padx=(0, 14), pady=0)
+        right.pack(side="right", fill="both", expand=True, padx=0, pady=0)
         left = left_sf.inner
 
-        ttk.Button(left, text="Load tape bundle folder…", command=self._load_bundle_async).pack(anchor="w", pady=4)
-        ttk.Button(left, text="Use memory (no disk)", command=self._use_memory).pack(anchor="w", pady=4)
+        self._section_title(left, "Player")
+        self._button(left, "Load tape bundle folder...", self._load_bundle_async).pack(anchor="w", fill="x", pady=4)
+        self._button(left, "Use memory (no disk)", self._use_memory).pack(anchor="w", fill="x", pady=4)
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
+        self._section_title(left, "Transport")
 
-        ttk.Button(left, text="Insert", command=self._player_insert).pack(anchor="w", pady=2)
-        ttk.Button(left, text="Eject", command=self._player_eject).pack(anchor="w", pady=2)
+        row_transport_1 = ctk.CTkFrame(left, fg_color="transparent"); row_transport_1.pack(fill="x", pady=2)
+        self._button(row_transport_1, "Insert", self._player_insert, width=82).pack(side="left", padx=(0, 6))
+        self._button(row_transport_1, "Eject", self._player_eject, width=82).pack(side="left")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
+        row_transport_2 = ctk.CTkFrame(left, fg_color="transparent"); row_transport_2.pack(fill="x", pady=2)
+        self._button(row_transport_2, "Play", self._player_play, accent=True, width=78).pack(side="left", padx=(0, 6))
+        self._button(row_transport_2, "Stop", self._player_stop, width=78).pack(side="left", padx=(0, 6))
+        self._button(row_transport_2, "FF", self._player_ff, width=58).pack(side="left", padx=(0, 6))
+        self._button(row_transport_2, "REW", self._player_rew, width=62).pack(side="left")
 
-        ttk.Button(left, text="Play", command=self._player_play).pack(anchor="w", pady=2)
-        ttk.Button(left, text="Stop", command=self._player_stop).pack(anchor="w", pady=2)
-        ttk.Button(left, text="FF", command=self._player_ff).pack(anchor="w", pady=2)
-        ttk.Button(left, text="REW", command=self._player_rew).pack(anchor="w", pady=2)
+        self._section_title(left, "Playback / VCR Effects")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Playback / VCR effects (final preview)").pack(anchor="w")
-
-        ttk.Label(left, text="Display aspect").pack(anchor="w")
         self.pb_aspect_play = tk.StringVar(value=self.pb_def.aspect_display)
-        ttk.Combobox(left, values=["4:3","16:9"], textvariable=self.pb_aspect_play, width=8, state="readonly").pack(anchor="w")
+        self._setting_combo(left, "Display aspect", self.pb_aspect_play, ["4:3","16:9"], "aspect_display", width=110)
 
         # Tracking controls moved here
         # Playback signal / VCR effects
@@ -1538,7 +1937,7 @@ class DigitalVCRApp:
         self._slider(left, "Servo recovery", "servo_recovery", 0.0, 1.0, key="pb")
         self._slider(left, "Sync bias", "sync_bias", 0.0, 1.0, key="pb")
 
-        ttk.Label(left, text="Servo / head switching").pack(anchor="w", pady=(8,0))
+        self._section_title(left, "Servo / Head Switching")
         self._slider(left, "Servo hunt (amount)", "servo_hunt", 0.0, 1.0, key="pb")
         self._slider(left, "Servo hunt frequency", "servo_hunt_freq", 0.0, 1.0, key="pb")
         self._slider(left, "Head switch (amount)", "head_switch_strength", 0.0, 1.0, key="pb")
@@ -1555,7 +1954,7 @@ class DigitalVCRApp:
         self._slider(left, "Snow frequency", "snow_freq", 0.0, 1.0, key="pb")
         self._slider(left, "Variance / instability", "variance", 0.0, 1.0, key="pb")
 
-        ttk.Label(left, text="Chroma").pack(anchor="w", pady=(8,0))
+        self._section_title(left, "Chroma")
         self._slider(left, "Chroma delay (horizontal)", "chroma_shift_x", 0.0, 1.0, key="pb")
         self._slider(left, "Chroma delay (vertical)", "chroma_shift_y", 0.0, 1.0, key="pb")
         self._slider(left, "Chroma phase error", "chroma_phase", 0.0, 1.0, key="pb")
@@ -1564,11 +1963,11 @@ class DigitalVCRApp:
         self._slider(left, "Chroma wobble", "chroma_wobble", 0.0, 1.0, key="pb")
         self._slider(left, "Chroma wobble frequency", "chroma_wobble_freq", 0.0, 1.0, key="pb")
 
-        ttk.Label(left, text="Scanline soften (turn up to hide scanlines)").pack(anchor="w", pady=(8,0))
+        self._section_title(left, "Scanlines")
         self._slider(left, "Scanlines", "scanline_strength", 0.0, 1.0, key="pb")
         self._slider(left, "Scanline soften", "scanline_soften", 0.0, 1.0, key="pb")
 
-        ttk.Label(left, text="Image controls").pack(anchor="w", pady=(8,0))
+        self._section_title(left, "Image Controls")
         self._slider(left, "Brightness", "brightness", -1.0, 1.0, key="pb")
         self._slider(left, "Contrast", "contrast", 0.0, 1.0, key="pb")
         self._slider(left, "Saturation", "saturation", 0.0, 1.0, key="pb")
@@ -1580,33 +1979,30 @@ class DigitalVCRApp:
         self._slider(left, "Jitter frequency", "frame_jitter_freq", 0.0, 1.0, key="pb")
 
         self.comp_play_var = tk.BooleanVar(value=self.pb_def.composite_view)
-        ttk.Checkbutton(left, text="Composite-ish view", variable=self.comp_play_var).pack(anchor="w", pady=4)
+        self._setting_switch(left, "Composite-ish view", self.comp_play_var, "composite_view")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Audio (Player)").pack(anchor="w")
+        self._section_title(left, "Audio (Player)")
         # Create audio playback vars here too (in case user never opens Editor)
         self._slider(left, "Audio hiss", "hiss", 0.0, 1.0, key="ap")
         self._slider(left, "Audio pops", "pops", 0.0, 1.0, key="ap")
 
         self.play_audio_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(left, text="Play audio (Windows built-in)", variable=self.play_audio_var).pack(anchor="w", pady=2)
+        self._setting_switch(left, "Play audio (Windows built-in)", self.play_audio_var, "play_audio")
+        self._button(left, "Preview tape audio", self._play_audio_preview).pack(anchor="w", fill="x", pady=(4,2))
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Prefetch / Proxy (smooth playback)").pack(anchor="w")
+        self._section_title(left, "Prefetch / Proxy")
         self.proxy_use_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="Use proxy for playback (if built)", variable=self.proxy_use_var).pack(anchor="w", pady=2)
+        self._setting_switch(left, "Use proxy for playback (if built)", self.proxy_use_var, "proxy_use")
         self.proxy_seconds_var = tk.DoubleVar(value=30.0)
-        ttk.Label(left, text="Proxy seconds").pack(anchor="w")
-        ttk.Scale(left, from_=5.0, to=600.0, orient="horizontal", variable=self.proxy_seconds_var).pack(anchor="w", fill="x")
-        ttk.Button(left, text="Build proxy in RAM…", command=self._build_proxy).pack(anchor="w", pady=4)
-        ttk.Button(left, text="Export final MP4…", command=self._export_from_player).pack(anchor="w", pady=4)
+        self._setting_header(left, "Proxy seconds", "proxy_seconds")
+        ctk.CTkSlider(left, from_=5.0, to=600.0, variable=self.proxy_seconds_var, progress_color=ACCENT, button_color=ACCENT_ACTIVE).pack(anchor="w", fill="x")
+        self._button(left, "Build proxy in RAM...", self._build_proxy).pack(anchor="w", fill="x", pady=4)
+        self._button(left, "Export final MP4...", self._export_from_player, accent=True).pack(anchor="w", fill="x", pady=4)
 
         self.play_status = tk.StringVar(value="Load tape, then Insert → Play.")
-        ttk.Label(left, textvariable=self.play_status, wraplength=360).pack(anchor="w", pady=(10,0))
+        ctk.CTkLabel(left, textvariable=self.play_status, wraplength=360, text_color=MUTED, justify="left").pack(anchor="w", pady=(10,0))
 
-        self.play_canvas = tk.Label(right, text="Player output (video + audio)", background="#111", foreground="#ddd")
+        self.play_canvas = tk.Label(right, text="Player output (video + audio)", background="#05070a", foreground=MUTED, bd=1, relief="solid", highlightbackground=BORDER)
         self.play_canvas.pack(fill="both", expand=True)
 
 
@@ -1759,25 +2155,24 @@ class DigitalVCRApp:
         This tab is intentionally separated so Recorder/Player tabs stay usable.
         """
         left_sf = VScrollFrame(self.tab_vhs, width=390)
-        right = ttk.Frame(self.tab_vhs)
-        left_sf.pack(side="left", fill="y", padx=10, pady=10)
-        right.pack(side="right", fill="both", expand=True, padx=10, pady=10)
+        right = ctk.CTkFrame(self.tab_vhs, fg_color=CARD_BG, corner_radius=16)
+        left_sf.pack(side="left", fill="y", padx=(0, 14), pady=0)
+        right.pack(side="right", fill="both", expand=True, padx=0, pady=0)
         left = left_sf.inner
 
-        ttk.Label(left, text="RF / Tape model (advanced)").pack(anchor="w")
-        ttk.Label(left, text="These parameters affect how FM/AM behaves before decode.").pack(anchor="w", pady=(0, 8))
+        self._section_title(left, "RF / Tape Model")
+        ctk.CTkLabel(left, text="Advanced FM/AM carrier controls before decode.", text_color=MUTED, wraplength=340, justify="left").pack(anchor="w", pady=(0, 8))
 
-        rowp = ttk.Frame(left); rowp.pack(anchor="w", fill="x", pady=(0,6))
-        ttk.Button(rowp, text="Save preset…", command=self._save_preset).pack(side="left")
-        ttk.Button(rowp, text="Load preset…", command=self._load_preset).pack(side="left", padx=6)
+        rowp = ctk.CTkFrame(left, fg_color="transparent"); rowp.pack(anchor="w", fill="x", pady=(0,6))
+        self._button(rowp, "Save preset...", self._save_preset, width=112).pack(side="left")
+        self._button(rowp, "Load preset...", self._load_preset, width=112).pack(side="left", padx=6)
 
         # Recorder-side toggle is also on the Recorder tab; reuse the same tk var.
         if not hasattr(self, 'real_rf_var'):
             self.real_rf_var = tk.BooleanVar(value=bool(getattr(self.rec_def, 'real_rf_modulation', False)))
-        ttk.Checkbutton(left, text="Enable Real RF modulation (FM+AM round-trip)", variable=self.real_rf_var).pack(anchor="w", pady=4)
+        self._setting_switch(left, "Enable Real RF modulation", self.real_rf_var, "real_rf_modulation")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Record-side RF parameters").pack(anchor="w")
+        self._section_title(left, "Record-side RF Parameters")
         self._slider(left, "RF FM depth (luma deviation)", "rf_fm_depth", 0.50, 1.50, key="rec")
         self._slider(left, "RF AM depth", "rf_am_depth", 0.0, 1.0, key="rec")
         self._slider(left, "RF phase noise", "rf_phase_noise", 0.0, 1.0, key="rec")
@@ -1786,12 +2181,11 @@ class DigitalVCRApp:
         self._slider(left, "Chroma carrier (fc fraction)", "rf_chroma_fc_frac", 0.02, 0.49, key="rec")
         self._slider(left, "Chroma demod low-pass", "rf_chroma_lpf", 0.0, 1.0, key="rec")
 
-        ttk.Separator(left, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(left, text="Playback-side RF / recombination").pack(anchor="w")
+        self._section_title(left, "Playback-side RF / Recombination")
 
         if not hasattr(self, 'rf_play_var'):
             self.rf_play_var = tk.BooleanVar(value=bool(getattr(self.pb_def, 'rf_playback_model', False)))
-        ttk.Checkbutton(left, text="Enable RF playback model", variable=self.rf_play_var).pack(anchor="w", pady=4)
+        self._setting_switch(left, "Enable RF playback model", self.rf_play_var, "rf_playback_model")
 
         self._slider(left, "Luma/Chroma bleed", "luma_chroma_bleed", 0.0, 1.0, key="pb")
         self._slider(left, "RF FM depth (playback)", "rf_playback_fm_depth", 0.50, 1.50, key="pb")
@@ -1804,7 +2198,8 @@ class DigitalVCRApp:
             "Tip: If you want 'clean' separation, keep Luma/Chroma bleed at 0.\n"
             "Then raise it slowly to introduce controlled cross-talk."
         )
-        ttk.Label(right, text=msg, justify="left", wraplength=420).pack(anchor="nw")
+        ctk.CTkLabel(right, text="VHS Tape", font=("Segoe UI", 18, "bold"), text_color=TEXT).pack(anchor="nw", padx=22, pady=(22, 8))
+        ctk.CTkLabel(right, text=msg, justify="left", wraplength=420, text_color=MUTED).pack(anchor="nw", padx=22)
 
     def _player_insert(self):
         with self.lock:
@@ -1827,28 +2222,52 @@ class DigitalVCRApp:
 
     def _player_play(self):
         with self.lock:
+            if not self.player.state.inserted:
+                self.player.insert()
             self.player.play()
             tape = self._active_tape()
-            pos_tracks = float(self.player.state.pos_tracks)
-        self._q("status_play", "Play")
+        status = "Play"
 
         # Audio playback (optional)
         try:
             if bool(self.play_audio_var.get()):
-                if not self.audio_player.available:
-                    self._q("status_play", "Play (audio disabled — Windows audio backend unavailable)")
-                elif tape.audio.pcm16 is not None and tape.audio.pcm16.size > 0:
-                    seconds = max(0.0, pos_tracks / 60.0)
-                    _pb, ap_def = self._current_playback_defects()
-                    self.audio_player.start_stream(
-                        tape,
-                        get_pos_sec=lambda: float(self.player.state.pos_tracks) / 60.0,
-                        get_lock=lambda: (float(getattr(self.player.state,'lock',0.0)) * (1.0 - 0.85*min(1.0, float(getattr(self.player.state,'switch_confuse_timer',0.0))/1.35))),
-                        ap_def=ap_def,
-                        chunk_sec=0.25,
-                    )
-        except Exception:
-            pass
+                audio_msg = self._start_player_audio_stream(tape)
+                if audio_msg:
+                    status = f"{status} ({audio_msg})"
+        except Exception as e:
+            status = f"{status} (audio failed: {e})"
+        self._q("status_play", status)
+
+    def _start_player_audio_stream(self, tape: TapeImage) -> str | None:
+        if not self.audio_player.available:
+            return "audio backend unavailable"
+        if tape.audio.pcm16 is None or tape.audio.pcm16.size == 0:
+            return "no audio on tape"
+        _pb, ap_def = self._current_playback_defects()
+        self.audio_player.start_stream(
+            tape,
+            get_pos_sec=lambda: float(self.player.state.pos_tracks) / 60.0,
+            get_lock=lambda: (float(getattr(self.player.state,'lock',0.0)) * (1.0 - 0.85*min(1.0, float(getattr(self.player.state,'switch_confuse_timer',0.0))/1.35))),
+            ap_def=ap_def,
+            chunk_sec=0.18,
+        )
+        if self.audio_player.last_error:
+            return self.audio_player.last_error
+        return "audio on"
+
+    def _play_audio_preview(self):
+        with self.lock:
+            tape = self._active_tape()
+            pos_tracks = float(self.player.state.pos_tracks)
+        if tape.audio.pcm16 is None or tape.audio.pcm16.size == 0:
+            self._q("status_play", "No audio is stored on this tape.")
+            return
+        start_sec = max(0.0, pos_tracks / 60.0)
+        self.audio_player.play_from_seconds(tape.audio.pcm16, int(tape.audio.sample_rate or 44100), start_sec)
+        if self.audio_player.last_error:
+            self._q("status_play", f"Audio preview failed: {self.audio_player.last_error}")
+        else:
+            self._q("status_play", f"Playing tape audio from {start_sec:.2f}s inside the UI.")
 
     def _player_stop(self):
         with self.lock:
@@ -1917,15 +2336,19 @@ class DigitalVCRApp:
         def worker():
             self._q("status_play", f"Building proxy… 0/{frames_target}")
             frames = []
+            proxy_player = VCRPlayer()
+            proxy_player.insert()
+            proxy_player.play()
+            proxy_player.state.inserting_timer = 1.2
+            proxy_player.state.lock = 1.0
             for i in range(frames_target):
                 base = start_tracks + i * step_tracks
                 if base >= tape.cart.length_tracks - 2:
                     break
-                fr = self.player.get_frame(tape, pb_def)
-                # We want deterministic: set position then get_frame
-                with self.lock:
-                    self.player.state.pos_tracks = float(base)
-                fr = self.player.get_frame(tape, pb_def)
+                proxy_player.state.pos_tracks = float(base)
+                proxy_player.state._last_pos_tracks = float(base)
+                proxy_player.update(tape, pb_def)
+                fr = proxy_player.get_frame(tape, pb_def)
                 if fr is None:
                     continue
                 # downscale proxy
@@ -1998,7 +2421,7 @@ class DigitalVCRApp:
                         frame = None
                         # Use proxy if enabled and available
                         try:
-                            use_proxy = bool(getattr(self, 'proxy_use_var').get()) if hasattr(self, 'proxy_use_var') else False
+                            use_proxy = bool(getattr(self, '_cached_proxy_use', False))
                         except Exception:
                             use_proxy = False
                         if use_proxy and self._proxy is not None:
@@ -2053,4 +2476,3 @@ class DigitalVCRApp:
             compression=_g("var_ar_compression", getattr(self.ar_def, "compression", 0.55)),
 
         )
-

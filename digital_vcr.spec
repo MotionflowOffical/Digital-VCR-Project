@@ -6,6 +6,7 @@ block_cipher = None
 hiddenimports = []
 hiddenimports += collect_submodules('vcr')
 hiddenimports += collect_submodules('PIL')
+hiddenimports += collect_submodules('customtkinter')
 hiddenimports += [
     'tkinter',
     'tkinter.ttk',
@@ -18,6 +19,7 @@ hiddenimports += [
 
 datas = []
 datas += collect_data_files('imageio_ffmpeg')
+datas += collect_data_files('customtkinter')
 
 binaries = []
 binaries += collect_dynamic_libs('cv2')

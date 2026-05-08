@@ -45,6 +45,7 @@ class AudioPlayer:
         self._thread: Optional[threading.Thread] = None
         self._tmp_paths: list[str] = []
         self.state = AudioState()
+        self.last_error: str | None = None
 
     @property
     def available(self) -> bool:
@@ -54,6 +55,7 @@ class AudioPlayer:
         with self._lock:
             self._gen += 1
             self.state.playing = False
+            self.last_error = None
         if winsound is not None:
             try:
                 winsound.PlaySound(None, winsound.SND_ASYNC)
@@ -88,18 +90,13 @@ class AudioPlayer:
             wf.writeframes(pcm16.tobytes())
         return bio.getvalue()
 
-        pcm16 = np.asarray(pcm16, dtype=np.int16)
-        with wave.open(path, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(int(sr))
-            wf.writeframes(pcm16.tobytes())
-
     def play_from_seconds(self, pcm16: np.ndarray, sample_rate: int, start_sec: float) -> None:
         """Simple one-shot playback (best-effort)."""
         if winsound is None:
+            self.last_error = "Windows audio backend is unavailable."
             return
         if pcm16 is None or pcm16.size == 0:
+            self.last_error = "No audio samples to play."
             return
         self._ensure_tmp_files()
         sr = int(sample_rate)
@@ -109,8 +106,9 @@ class AudioPlayer:
         self._write_wav(self._tmp_paths[0], seg, sr)
         try:
             winsound.PlaySound(self._tmp_paths[0], winsound.SND_FILENAME | winsound.SND_ASYNC)
+            self.last_error = None
         except Exception:
-            pass
+            self.last_error = "Could not start audio playback."
 
     def start_stream(self,
                      tape: TapeImage,
@@ -120,13 +118,16 @@ class AudioPlayer:
                      chunk_sec: float = 0.25) -> None:
         """Start chunked playback that follows the current playhead position."""
         if winsound is None:
+            self.last_error = "Windows audio backend is unavailable."
             return
         if tape.audio.pcm16 is None or tape.audio.pcm16.size == 0:
+            self.last_error = "No audio is stored on this tape."
             return
 
         with self._lock:
             self._gen += 1
             gen = self._gen
+            self.last_error = None
             self.state = AudioState(playing=True, sample_rate=int(tape.audio.sample_rate or 44100), chunk_sec=float(chunk_sec))
             self._ensure_tmp_files()
 
@@ -221,6 +222,7 @@ class AudioPlayer:
                         # store last error for debugging
                         try:
                             self.state.last_error = str(e)
+                            self.last_error = str(e)
                         except Exception:
                             pass
                         break
