@@ -1,4 +1,4 @@
-# Digital VCR (V6_13_8)
+# Digital VCR (V7)
 
 A desktop VHS-style video recorder and playback simulator built with **CustomTkinter + OpenCV + NumPy**.
 It records source video into a custom tape format, plays it back with tracking/RF defects,
