@@ -16,6 +16,12 @@ vcr/__pycache__/
 
 \tests\__pycache__
 
-\dist
+dist\
 
-\tapes
+tapes\
+
+.venv\
+
+dist\
+
+build\
