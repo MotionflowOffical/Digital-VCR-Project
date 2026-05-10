@@ -1,0 +1,21 @@
+# Ignore tapes folder
+tapes/
+
+# Ignore Python cache directories
+__pycache__/
+*.pyc
+
+# Specifically ignore test file (if you really want it excluded)
+tests/test_crt.py
+
+# If you only want to ignore that specific cached pytest bytecode file
+tests/__pycache__/test_crt.cpython-310-pytest-8.2.0.pyc
+
+# vcr module cache files
+vcr/__pycache__/
+
+\tests\__pycache__
+
+\dist
+
+\tapes
