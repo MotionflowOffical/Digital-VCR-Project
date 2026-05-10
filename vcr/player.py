@@ -107,9 +107,17 @@ class SnowField:
 
         return np.clip(out, 0, 255).astype(np.uint8)
 
+def _playback_interference_strength(pb: PlaybackDefects, sync: float, stress: float, gate: float) -> float:
+    amount = float(np.clip(float(getattr(pb, "interference", 0.0)), 0.0, 1.0))
+    if amount <= 0.0:
+        return 0.0
+    sync_loss = float(np.clip(1.0 - float(sync), 0.0, 1.0))
+    stress = float(np.clip(stress, 0.0, 1.0))
+    gate = float(np.clip(gate, 0.0, 1.0))
+    return float(np.clip(amount * (0.55 + 0.85 * stress + 0.25 * sync_loss), 0.0, 1.0)) * gate
+
+
 class VCRPlayer:
-
-
     def __init__(self):
         self.state = ServoState()
         self._t_last = time.perf_counter()
@@ -561,7 +569,7 @@ class VCRPlayer:
         csy = (pb.chroma_shift_y * (1.0 + 1.7*conf)) + (0.25*wob) * wob_c
         frame = apply_chroma_shift(frame, csx, csy, wob_phase, ch_noise + 0.55*conf)
         stress2 = float(np.clip(0.55*(1.0-lock) + 0.35*tracking_err + 0.25*conf, 0.0, 1.0))
-        intf_strength = float(np.clip(pb.interference*(0.55 + 0.85*stress2) + 0.25*(1.0-sync), 0.0, 1.0)) * float(getattr(s, "intf_gate", 1.0))
+        intf_strength = _playback_interference_strength(pb, sync, stress2, getattr(s, "intf_gate", 1.0))
 
         frame = apply_interference(frame, intf_strength, variance=getattr(pb, 'variance', 0.55))
 

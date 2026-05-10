@@ -13,6 +13,7 @@ hiddenimports += collect_submodules('customtkinter')
 hiddenimports += collect_submodules('moderngl')
 hiddenimports += collect_submodules('glcontext')
 hiddenimports += collect_submodules('glfw')
+hiddenimports += collect_submodules('pygrabber')
 hiddenimports += [
     'tkinter',
     'tkinter.ttk',
@@ -24,6 +25,9 @@ hiddenimports += [
     'moderngl',
     'glfw',
     'glcontext',
+    'pygrabber',
+    'comtypes.client',
+    'comtypes.persist',
 ]
 
 datas = []

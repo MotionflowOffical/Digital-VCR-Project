@@ -12,6 +12,7 @@ import time
 import traceback
 import datetime
 import json
+import subprocess
 
 from ..tape import TapeImage, TapeCartridge, TapeTrack
 from ..bundle import save_bundle, load_bundle, create_blank_bundle
@@ -63,8 +64,12 @@ CAMERA_SCAN_BACKENDS = (
 )
 
 
-def _camera_selection_label(index: int, api_preference: int) -> str:
-    return str(int(index))
+def _camera_selection_label(index: int, api_preference: int, name: str | None = None) -> str:
+    label = str(int(index))
+    clean_name = str(name or "").strip()
+    if clean_name:
+        return f"{label} - {clean_name}"
+    return label
 
 
 def _parse_camera_selection(value: str) -> tuple[int, int]:
@@ -82,20 +87,26 @@ def _parse_camera_selection(value: str) -> tuple[int, int]:
 
 
 def _camera_values_from_discovery(
-    discovered: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+    discovered: list[tuple[int, int] | tuple[int, int, str]] | tuple[tuple[int, int] | tuple[int, int, str], ...],
     max_index: int = 23,
 ) -> list[str]:
     values: list[str] = []
-    seen: set[str] = set()
+    seen: set[int] = set()
 
-    def add(index: int) -> None:
-        label = str(int(index))
-        if label not in seen:
-            seen.add(label)
+    def add(index: int, api: int = 0, name: str | None = None) -> None:
+        idx = int(index)
+        label = _camera_selection_label(idx, int(api), name)
+        if idx not in seen:
+            seen.add(idx)
             values.append(label)
 
-    for index, api in discovered:
-        add(int(index))
+    for item in discovered:
+        try:
+            index, api, name = item
+        except ValueError:
+            index, api = item
+            name = ""
+        add(int(index), int(api), str(name or ""))
 
     if values:
         return values
@@ -103,6 +114,62 @@ def _camera_values_from_discovery(
     for index in range(0, int(max_index) + 1):
         add(index)
     return values
+
+
+def _discover_windows_camera_names() -> list[str]:
+    command = (
+        "Get-CimInstance Win32_PnPEntity | "
+        "Where-Object { $_.PNPClass -in @('Camera','Image') } | "
+        "Select-Object -ExpandProperty Name"
+    )
+    try:
+        flags = 0
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            flags = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=4.0,
+            creationflags=flags,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for line in result.stdout.splitlines():
+        name = " ".join(str(line).strip().split())
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    return names
+
+
+def _discover_directshow_camera_names() -> list[str]:
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+
+        devices = FilterGraph().get_input_devices()
+    except Exception:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in devices or []:
+        name = " ".join(str(raw).strip().split())
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        names.append(name)
+    return names
 
 
 def _camera_backend_fallbacks(selected_api: int) -> list[int]:
@@ -134,6 +201,77 @@ def _put_latest(q: queue.Queue, item) -> None:
 
 def _should_publish_live_signal_loss(read_failures: int, threshold: int = 8) -> bool:
     return int(read_failures) >= int(threshold)
+
+
+def clean_live_record_defects(mode: str = "SP") -> RecordDefects:
+    base = RecordDefects(tape_mode=str(mode or "SP"))
+    base.record_blur = 0.0
+    base.record_jitter = 0.0
+    base.record_rf_noise = 0.0
+    base.record_dropouts = 0.0
+    base.real_rf_modulation = False
+    base.rf_am_depth = 0.0
+    base.rf_phase_noise = 0.0
+    base.rf_carrier_noise = 0.0
+    base.rf_nonlinearity = 0.0
+    return base
+
+
+def clean_live_playback_defects() -> PlaybackDefects:
+    pb = PlaybackDefects()
+    for name in (
+        "tracking_artifacts",
+        "auto_tracking",
+        "servo_hunt",
+        "servo_hunt_freq",
+        "head_switch_strength",
+        "head_switch_freq",
+        "playback_timebase",
+        "timebase_freq",
+        "playback_rf_noise",
+        "playback_dropouts",
+        "dropout_freq",
+        "interference",
+        "interference_freq",
+        "snow",
+        "snow_freq",
+        "variance",
+        "chroma_shift_x",
+        "chroma_shift_y",
+        "chroma_phase",
+        "chroma_noise",
+        "chroma_noise_freq",
+        "chroma_wobble",
+        "chroma_wobble_freq",
+        "bloom",
+        "sharpen",
+        "playback_blur",
+        "playback_blur_freq",
+        "frame_jitter",
+        "frame_jitter_freq",
+        "scanline_strength",
+        "luma_chroma_bleed",
+        "rf_playback_am_depth",
+        "rf_playback_phase_noise",
+        "rf_playback_carrier_noise",
+        "rf_playback_nonlinearity",
+    ):
+        if hasattr(pb, name):
+            setattr(pb, name, 0.0)
+    pb.tracking_knob = 0.50
+    pb.sync_bias = 0.50
+    pb.contrast = 0.0
+    pb.saturation = 0.0
+    pb.rf_playback_model = False
+    return pb
+
+
+def clean_live_audio_record_defects() -> AudioRecordDefects:
+    return AudioRecordDefects(wow=0.0, hiss=0.0, dropouts=0.0, compression=0.0)
+
+
+def clean_live_audio_playback_defects() -> AudioPlaybackDefects:
+    return AudioPlaybackDefects(hiss=0.0, pops=0.0)
 
 
 def _preprocess_live_frame(frame: np.ndarray, target_w: int, use_opencl: bool = True) -> np.ndarray:
@@ -416,6 +554,10 @@ class DigitalVCRApp:
         self.pb_def = PlaybackDefects()  # defaults include softer scanlines
         self.ar_def = AudioRecordDefects()
         self.ap_def = AudioPlaybackDefects()
+        self.live_rec_def = clean_live_record_defects()
+        self.live_pb_def = clean_live_playback_defects()
+        self.live_ar_def = clean_live_audio_record_defects()
+        self.live_ap_def = clean_live_audio_playback_defects()
         self.rec_opts = RecordOptions()
         self.crt_settings = consumer_tv_preset()
         self.crt_renderer = CRTFrameRenderer()
@@ -460,7 +602,9 @@ class DigitalVCRApp:
         self._live_read_failures = 0
         self._live_seg_id = int(time.time()*1000) & 0x7fffffff
         self._live_frame_idx = 0
+        self._live_session_id = 0
         self._live_publish_seq = 0
+        self._live_crt_published_seq = 0
         self._live_frame_q = queue.Queue(maxsize=2)
         self._live_crt_q = queue.Queue(maxsize=1)
         self._live_cap_lock = threading.Lock()
@@ -477,6 +621,10 @@ class DigitalVCRApp:
         self._cached_rec_def = self.rec_def
         self._cached_pb_def = self.pb_def
         self._cached_ap_def = self.ap_def
+        self._cached_live_rec_def = self.live_rec_def
+        self._cached_live_pb_def = self.live_pb_def
+        self._cached_live_ar_def = self.live_ar_def
+        self._cached_live_ap_def = self.live_ap_def
         self._cached_crt_settings = self.crt_settings
         self._cached_proxy_use = False
         self._cached_live_bufsec = 6.0
@@ -624,6 +772,14 @@ class DigitalVCRApp:
             self._cached_rec_def = r
             self._cached_pb_def = p
             self._cached_ap_def = ap
+            try:
+                live_r, live_p, live_ar, live_ap = self._sync_live_defects()
+                self._cached_live_rec_def = live_r
+                self._cached_live_pb_def = live_p
+                self._cached_live_ar_def = live_ar
+                self._cached_live_ap_def = live_ap
+            except Exception:
+                pass
 
             try:
                 self._cached_live_downscale_width = int(getattr(self, "var_live_downscale_width").get())
@@ -1042,16 +1198,36 @@ class DigitalVCRApp:
             existing = getattr(self, f"var_rec_edit_{name}", None)
             var = existing if existing is not None else tk.DoubleVar(value=init)
             setattr(self, f"var_rec_edit_{name}", var)
+        elif key == "rec_live":
+            init = float(getattr(self.live_rec_def, name))
+            existing = getattr(self, f"var_live_rec_{name}", None)
+            var = existing if existing is not None else tk.DoubleVar(value=init)
+            setattr(self, f"var_live_rec_{name}", var)
         elif key == "pb":
             init = float(getattr(self.pb_def, name, 0.0))
             existing = getattr(self, f"var_pb_{name}", None)
             var = existing if existing is not None else tk.DoubleVar(value=init)
             setattr(self, f"var_pb_{name}", var)
+        elif key == "pb_live":
+            init = float(getattr(self.live_pb_def, name, 0.0))
+            existing = getattr(self, f"var_live_pb_{name}", None)
+            var = existing if existing is not None else tk.DoubleVar(value=init)
+            setattr(self, f"var_live_pb_{name}", var)
         elif key == "ar":
             init = float(getattr(self.ar_def, name))
             existing = getattr(self, f"var_ar_{name}", None)
             var = existing if existing is not None else tk.DoubleVar(value=init)
             setattr(self, f"var_ar_{name}", var)
+        elif key == "ar_live":
+            init = float(getattr(self.live_ar_def, name))
+            existing = getattr(self, f"var_live_ar_{name}", None)
+            var = existing if existing is not None else tk.DoubleVar(value=init)
+            setattr(self, f"var_live_ar_{name}", var)
+        elif key == "ap_live":
+            init = float(getattr(self.live_ap_def, name))
+            existing = getattr(self, f"var_live_ap_{name}", None)
+            var = existing if existing is not None else tk.DoubleVar(value=init)
+            setattr(self, f"var_live_ap_{name}", var)
         else:
             init = float(getattr(self.ap_def, name))
             existing = getattr(self, f"var_ap_{name}", None)
@@ -1633,6 +1809,108 @@ class DigitalVCRApp:
             pops=_v("var_ap_pops", ap0.pops),
         )
         return rec, pb, ap
+
+    def _sync_live_defects(self):
+        def _v(attr_name: str, default):
+            try:
+                return float(getattr(self, attr_name).get())
+            except Exception:
+                return float(default)
+
+        mode = str(getattr(self, "_cached_live_tape_mode", "SP"))
+        try:
+            mode = str(self.live_tape_mode_var.get())
+        except Exception:
+            pass
+
+        r0 = getattr(self, "live_rec_def", clean_live_record_defects(mode))
+        rec = RecordDefects(
+            tape_mode=mode,
+            luma_bw=_v("var_live_rec_luma_bw", r0.luma_bw),
+            chroma_bw=_v("var_live_rec_chroma_bw", getattr(r0, "chroma_bw", 1.0)),
+            record_blur=_v("var_live_rec_record_blur", r0.record_blur),
+            record_jitter=_v("var_live_rec_record_jitter", r0.record_jitter),
+            record_rf_noise=_v("var_live_rec_record_rf_noise", r0.record_rf_noise),
+            record_dropouts=_v("var_live_rec_record_dropouts", r0.record_dropouts),
+            real_rf_modulation=False,
+            rf_fm_depth=_v("var_live_rec_rf_fm_depth", getattr(r0, "rf_fm_depth", 1.0)),
+            rf_am_depth=_v("var_live_rec_rf_am_depth", getattr(r0, "rf_am_depth", 0.0)),
+            rf_phase_noise=_v("var_live_rec_rf_phase_noise", getattr(r0, "rf_phase_noise", 0.0)),
+            rf_carrier_noise=_v("var_live_rec_rf_carrier_noise", getattr(r0, "rf_carrier_noise", 0.0)),
+            rf_nonlinearity=_v("var_live_rec_rf_nonlinearity", getattr(r0, "rf_nonlinearity", 0.0)),
+            rf_chroma_fc_frac=_v("var_live_rec_rf_chroma_fc_frac", getattr(r0, "rf_chroma_fc_frac", 0.12)),
+            rf_chroma_lpf=_v("var_live_rec_rf_chroma_lpf", getattr(r0, "rf_chroma_lpf", 0.35)),
+        )
+
+        pb0 = getattr(self, "live_pb_def", clean_live_playback_defects())
+        pb = PlaybackDefects(
+            aspect_display=getattr(pb0, "aspect_display", "4:3"),
+            tracking_knob=_v("var_live_pb_tracking_knob", pb0.tracking_knob),
+            tracking_sensitivity=_v("var_live_pb_tracking_sensitivity", pb0.tracking_sensitivity),
+            tracking_artifacts=_v("var_live_pb_tracking_artifacts", pb0.tracking_artifacts),
+            auto_tracking=_v("var_live_pb_auto_tracking", getattr(pb0, "auto_tracking", 0.0)),
+            auto_tracking_strength=_v("var_live_pb_auto_tracking_strength", getattr(pb0, "auto_tracking_strength", 0.70)),
+            servo_recovery=_v("var_live_pb_servo_recovery", pb0.servo_recovery),
+            sync_bias=_v("var_live_pb_sync_bias", pb0.sync_bias),
+            servo_hunt=_v("var_live_pb_servo_hunt", getattr(pb0, "servo_hunt", 0.0)),
+            servo_hunt_freq=_v("var_live_pb_servo_hunt_freq", getattr(pb0, "servo_hunt_freq", 0.0)),
+            head_switch_strength=_v("var_live_pb_head_switch_strength", getattr(pb0, "head_switch_strength", 0.0)),
+            head_switch_freq=_v("var_live_pb_head_switch_freq", getattr(pb0, "head_switch_freq", 0.0)),
+            playback_timebase=_v("var_live_pb_playback_timebase", pb0.playback_timebase),
+            timebase_freq=_v("var_live_pb_timebase_freq", getattr(pb0, "timebase_freq", 0.0)),
+            playback_rf_noise=_v("var_live_pb_playback_rf_noise", pb0.playback_rf_noise),
+            playback_dropouts=_v("var_live_pb_playback_dropouts", pb0.playback_dropouts),
+            dropout_freq=_v("var_live_pb_dropout_freq", getattr(pb0, "dropout_freq", 0.0)),
+            interference=_v("var_live_pb_interference", pb0.interference),
+            interference_freq=_v("var_live_pb_interference_freq", getattr(pb0, "interference_freq", 0.0)),
+            snow=_v("var_live_pb_snow", pb0.snow),
+            snow_freq=_v("var_live_pb_snow_freq", getattr(pb0, "snow_freq", 0.0)),
+            variance=_v("var_live_pb_variance", pb0.variance),
+            composite_view=False,
+            chroma_shift_x=_v("var_live_pb_chroma_shift_x", pb0.chroma_shift_x),
+            chroma_shift_y=_v("var_live_pb_chroma_shift_y", pb0.chroma_shift_y),
+            chroma_phase=_v("var_live_pb_chroma_phase", pb0.chroma_phase),
+            chroma_noise=_v("var_live_pb_chroma_noise", pb0.chroma_noise),
+            chroma_noise_freq=_v("var_live_pb_chroma_noise_freq", getattr(pb0, "chroma_noise_freq", 0.0)),
+            chroma_wobble=_v("var_live_pb_chroma_wobble", getattr(pb0, "chroma_wobble", 0.0)),
+            chroma_wobble_freq=_v("var_live_pb_chroma_wobble_freq", getattr(pb0, "chroma_wobble_freq", 0.0)),
+            brightness=_v("var_live_pb_brightness", pb0.brightness),
+            contrast=_v("var_live_pb_contrast", pb0.contrast),
+            saturation=_v("var_live_pb_saturation", pb0.saturation),
+            bloom=_v("var_live_pb_bloom", pb0.bloom),
+            sharpen=_v("var_live_pb_sharpen", pb0.sharpen),
+            playback_blur=_v("var_live_pb_playback_blur", getattr(pb0, "playback_blur", 0.0)),
+            playback_blur_freq=_v("var_live_pb_playback_blur_freq", getattr(pb0, "playback_blur_freq", 0.0)),
+            frame_jitter=_v("var_live_pb_frame_jitter", getattr(pb0, "frame_jitter", 0.0)),
+            frame_jitter_freq=_v("var_live_pb_frame_jitter_freq", getattr(pb0, "frame_jitter_freq", 0.0)),
+            scanline_strength=_v("var_live_pb_scanline_strength", getattr(pb0, "scanline_strength", 0.0)),
+            scanline_soften=_v("var_live_pb_scanline_soften", pb0.scanline_soften),
+            luma_chroma_bleed=_v("var_live_pb_luma_chroma_bleed", getattr(pb0, "luma_chroma_bleed", 0.0)),
+            rf_playback_model=False,
+            rf_playback_fm_depth=_v("var_live_pb_rf_playback_fm_depth", getattr(pb0, "rf_playback_fm_depth", 1.0)),
+            rf_playback_am_depth=_v("var_live_pb_rf_playback_am_depth", getattr(pb0, "rf_playback_am_depth", 0.0)),
+            rf_playback_phase_noise=_v("var_live_pb_rf_playback_phase_noise", getattr(pb0, "rf_playback_phase_noise", 0.0)),
+            rf_playback_carrier_noise=_v("var_live_pb_rf_playback_carrier_noise", getattr(pb0, "rf_playback_carrier_noise", 0.0)),
+            rf_playback_nonlinearity=_v("var_live_pb_rf_playback_nonlinearity", getattr(pb0, "rf_playback_nonlinearity", 0.0)),
+        )
+
+        ar0 = getattr(self, "live_ar_def", clean_live_audio_record_defects())
+        ar = AudioRecordDefects(
+            wow=_v("var_live_ar_wow", ar0.wow),
+            hiss=_v("var_live_ar_hiss", ar0.hiss),
+            dropouts=_v("var_live_ar_dropouts", ar0.dropouts),
+            compression=_v("var_live_ar_compression", ar0.compression),
+        )
+        ap0 = getattr(self, "live_ap_def", clean_live_audio_playback_defects())
+        ap = AudioPlaybackDefects(
+            hiss=_v("var_live_ap_hiss", ap0.hiss),
+            pops=_v("var_live_ap_pops", ap0.pops),
+        )
+        self.live_rec_def = rec
+        self.live_pb_def = pb
+        self.live_ar_def = ar
+        self.live_ap_def = ap
+        return rec, pb, ar, ap
     
     def _save_bundle(self):
         with self.lock:
@@ -1755,68 +2033,68 @@ class DigitalVCRApp:
         ctk.CTkLabel(left, text="Higher = sharper; OpenCL resize helps when available, VHS encode remains CPU.", text_color=MUTED, wraplength=360, justify="left").pack(anchor="w", pady=(0,4))
 
         # Video record-side sliders
-        self._slider(left, "Luma bandwidth", "luma_bw", 0.35, 1.0, key="rec")
-        self._slider(left, "Record blur", "record_blur", 0.0, 1.0, key="rec")
-        self._slider(left, "Record jitter", "record_jitter", 0.0, 1.0, key="rec")
-        self._slider(left, "Record RF noise", "record_rf_noise", 0.0, 0.15, key="rec")
-        self._slider(left, "Record dropouts", "record_dropouts", 0.0, 0.10, key="rec")
+        self._slider(left, "Luma bandwidth", "luma_bw", 0.35, 1.0, key="rec_live")
+        self._slider(left, "Record blur", "record_blur", 0.0, 1.0, key="rec_live")
+        self._slider(left, "Record jitter", "record_jitter", 0.0, 1.0, key="rec_live")
+        self._slider(left, "Record RF noise", "record_rf_noise", 0.0, 0.15, key="rec_live")
+        self._slider(left, "Record dropouts", "record_dropouts", 0.0, 0.10, key="rec_live")
 
         self._section_title(left, "Live Controls (Audio Record)")
 
         # Audio record-side sliders
-        self._slider(left, "Audio wow/flutter", "wow", 0.0, 1.0, key="ar")
-        self._slider(left, "Audio hiss", "hiss", 0.0, 1.0, key="ar")
-        self._slider(left, "Audio dropouts", "dropouts", 0.0, 0.25, key="ar")
-        self._slider(left, "Audio compression", "compression", 0.0, 1.0, key="ar")
+        self._slider(left, "Audio wow/flutter", "wow", 0.0, 1.0, key="ar_live")
+        self._slider(left, "Audio hiss", "hiss", 0.0, 1.0, key="ar_live")
+        self._slider(left, "Audio dropouts", "dropouts", 0.0, 0.25, key="ar_live")
+        self._slider(left, "Audio compression", "compression", 0.0, 1.0, key="ar_live")
 
         self._section_title(left, "Live Controls (Playback / Tracking)")
 
         # Playback-side sliders (same as Player tab)
-        self._slider(left, "Tracking knob", "tracking_knob", 0.0, 1.0, key="pb")
-        self._slider(left, "Tracking sensitivity", "tracking_sensitivity", 0.0, 1.0, key="pb")
-        self._slider(left, "Tracking artifacts", "tracking_artifacts", 0.0, 2.0, key="pb")
-        self._slider(left, "Auto tracking (0=off, 1=on)", "auto_tracking", 0.0, 1.0, key="pb")
-        self._slider(left, "Auto tracking strength", "auto_tracking_strength", 0.0, 1.0, key="pb")
-        self._slider(left, "Servo recovery", "servo_recovery", 0.0, 1.0, key="pb")
-        self._slider(left, "Sync bias", "sync_bias", 0.0, 1.0, key="pb")
-        self._slider(left, "Servo hunt (amount)", "servo_hunt", 0.0, 1.0, key="pb")
-        self._slider(left, "Servo hunt frequency", "servo_hunt_freq", 0.0, 1.0, key="pb")
-        self._slider(left, "Head switch (amount)", "head_switch_strength", 0.0, 1.0, key="pb")
-        self._slider(left, "Head switch frequency", "head_switch_freq", 0.0, 1.0, key="pb")
-        self._slider(left, "Timebase (amount)", "playback_timebase", 0.0, 1.0, key="pb")
-        self._slider(left, "Timebase frequency", "timebase_freq", 0.0, 1.0, key="pb")
-        self._slider(left, "Playback RF noise", "playback_rf_noise", 0.0, 0.25, key="pb")
-        self._slider(left, "Dropouts (amount)", "playback_dropouts", 0.0, 0.12, key="pb")
-        self._slider(left, "Dropouts frequency", "dropout_freq", 0.0, 1.0, key="pb")
-        self._slider(left, "Interference (amount)", "interference", 0.0, 1.0, key="pb")
-        self._slider(left, "Interference frequency", "interference_freq", 0.0, 1.0, key="pb")
-        self._slider(left, "Variance / instability", "variance", 0.0, 1.0, key="pb")
-        self._slider(left, "Snow (amount)", "snow", 0.0, 1.0, key="pb")
-        self._slider(left, "Snow frequency", "snow_freq", 0.0, 1.0, key="pb")
+        self._slider(left, "Tracking knob", "tracking_knob", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Tracking sensitivity", "tracking_sensitivity", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Tracking artifacts", "tracking_artifacts", 0.0, 2.0, key="pb_live")
+        self._slider(left, "Auto tracking (0=off, 1=on)", "auto_tracking", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Auto tracking strength", "auto_tracking_strength", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Servo recovery", "servo_recovery", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Sync bias", "sync_bias", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Servo hunt (amount)", "servo_hunt", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Servo hunt frequency", "servo_hunt_freq", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Head switch (amount)", "head_switch_strength", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Head switch frequency", "head_switch_freq", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Timebase (amount)", "playback_timebase", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Timebase frequency", "timebase_freq", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Playback RF noise", "playback_rf_noise", 0.0, 0.25, key="pb_live")
+        self._slider(left, "Dropouts (amount)", "playback_dropouts", 0.0, 0.12, key="pb_live")
+        self._slider(left, "Dropouts frequency", "dropout_freq", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Interference (amount)", "interference", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Interference frequency", "interference_freq", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Variance / instability", "variance", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Snow (amount)", "snow", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Snow frequency", "snow_freq", 0.0, 1.0, key="pb_live")
 
-        self._slider(left, "Chroma delay (horizontal)", "chroma_shift_x", 0.0, 1.0, key="pb")
-        self._slider(left, "Chroma delay (vertical)", "chroma_shift_y", 0.0, 1.0, key="pb")
-        self._slider(left, "Chroma phase error", "chroma_phase", 0.0, 1.0, key="pb")
-        self._slider(left, "Chroma phase noise", "chroma_noise", 0.0, 1.0, key="pb")
-        self._slider(left, "Chroma noise frequency", "chroma_noise_freq", 0.0, 1.0, key="pb")
-        self._slider(left, "Chroma wobble", "chroma_wobble", 0.0, 1.0, key="pb")
-        self._slider(left, "Chroma wobble frequency", "chroma_wobble_freq", 0.0, 1.0, key="pb")
+        self._slider(left, "Chroma delay (horizontal)", "chroma_shift_x", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Chroma delay (vertical)", "chroma_shift_y", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Chroma phase error", "chroma_phase", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Chroma phase noise", "chroma_noise", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Chroma noise frequency", "chroma_noise_freq", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Chroma wobble", "chroma_wobble", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Chroma wobble frequency", "chroma_wobble_freq", 0.0, 1.0, key="pb_live")
 
-        self._slider(left, "Scanlines", "scanline_strength", 0.0, 1.0, key="pb")
-        self._slider(left, "Scanline soften", "scanline_soften", 0.0, 1.0, key="pb")
-        self._slider(left, "Brightness", "brightness", -1.0, 1.0, key="pb")
-        self._slider(left, "Contrast", "contrast", 0.0, 1.0, key="pb")
-        self._slider(left, "Saturation", "saturation", 0.0, 1.0, key="pb")
-        self._slider(left, "Bloom", "bloom", 0.0, 1.0, key="pb")
-        self._slider(left, "Sharpen", "sharpen", 0.0, 1.0, key="pb")
-        self._slider(left, "Playback blur", "playback_blur", 0.0, 1.0, key="pb")
-        self._slider(left, "Blur frequency", "playback_blur_freq", 0.0, 1.0, key="pb")
-        self._slider(left, "Frame jitter", "frame_jitter", 0.0, 1.0, key="pb")
-        self._slider(left, "Jitter frequency", "frame_jitter_freq", 0.0, 1.0, key="pb")
+        self._slider(left, "Scanlines", "scanline_strength", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Scanline soften", "scanline_soften", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Brightness", "brightness", -1.0, 1.0, key="pb_live")
+        self._slider(left, "Contrast", "contrast", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Saturation", "saturation", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Bloom", "bloom", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Sharpen", "sharpen", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Playback blur", "playback_blur", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Blur frequency", "playback_blur_freq", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Frame jitter", "frame_jitter", 0.0, 1.0, key="pb_live")
+        self._slider(left, "Jitter frequency", "frame_jitter_freq", 0.0, 1.0, key="pb_live")
 
         self._section_title(left, "Live Controls (Audio Playback)")
-        self._slider(left, "Audio hiss", "hiss", 0.0, 1.0, key="ap")
-        self._slider(left, "Audio pops", "pops", 0.0, 1.0, key="ap")
+        self._slider(left, "Audio hiss", "hiss", 0.0, 1.0, key="ap_live")
+        self._slider(left, "Audio pops", "pops", 0.0, 1.0, key="ap_live")
 
         self._section_title(left, "Quick Access")
         self._button(left, "Go to Recorder", lambda: self.nb.select(self.tab_rec)).pack(anchor="w", fill="x", pady=2)
@@ -1844,7 +2122,7 @@ class DigitalVCRApp:
             return
         self._camera_refreshing = True
         try:
-            self.live_status.set("Scanning DirectShow cameras in background...")
+            self.live_status.set("Scanning connected cameras in background...")
         except Exception:
             pass
 
@@ -1854,8 +2132,17 @@ class DigitalVCRApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _scan_cameras_directshow(self) -> list[tuple[int, int]]:
-        avail: list[tuple[int, int]] = []
+    def _scan_cameras_directshow(self) -> list[tuple[int, int, str]]:
+        dshow_api = int(dict(CAMERA_BACKENDS)["DirectShow"])
+        names = _discover_directshow_camera_names()
+        if names:
+            return [(i, dshow_api, name) for i, name in enumerate(names)]
+
+        names = _discover_windows_camera_names()
+        if names:
+            return [(i, dshow_api, name) for i, name in enumerate(names)]
+
+        avail: list[tuple[int, int, str]] = []
         old_log_level = None
         try:
             if hasattr(cv2, "getLogLevel") and hasattr(cv2, "setLogLevel"):
@@ -1865,14 +2152,14 @@ class DigitalVCRApp:
             old_log_level = None
         try:
             seen = set()
-            for i in range(0, 24):
-                for _name, api in CAMERA_SCAN_BACKENDS:
+            for i in range(0, 8):
+                for _name, api in (("DirectShow", cv2.CAP_DSHOW), ("Auto", cv2.CAP_ANY)):
                     cap = None
                     try:
                         cap = cv2.VideoCapture(i, int(api))
                         if cap is not None and cap.isOpened() and i not in seen:
                             seen.add(i)
-                            avail.append((i, int(api)))
+                            avail.append((i, int(api), ""))
                             break
                     except Exception:
                         pass
@@ -1889,9 +2176,9 @@ class DigitalVCRApp:
                 pass
         return avail
 
-    def _finish_camera_refresh(self, avail: list[tuple[int, int]]):
+    def _finish_camera_refresh(self, avail: list[tuple[int, int, str]]):
         self._camera_refreshing = False
-        self._camera_backend_by_index = {int(index): int(api) for index, api in avail}
+        self._camera_backend_by_index = {int(item[0]): int(item[1]) for item in avail}
         cur = str(self.live_cam_var.get()) if hasattr(self, "live_cam_var") else "0"
         values = _camera_values_from_discovery(avail, max_index=7)
         self._apply_camera_values(values, cur)
@@ -1936,10 +2223,13 @@ class DigitalVCRApp:
         except Exception:
             pass
         self._live_on = on
+        self._live_session_id = int(getattr(self, "_live_session_id", 0)) + 1
         self._clear_live_frame_queue()
         if on:
             self._latest_live_frame = None
             self._live_last_good = None
+            self._live_publish_seq = 0
+            self._live_crt_published_seq = 0
             try:
                 self.live_status.set("Live mode: starting…")
             except Exception:
@@ -2014,20 +2304,40 @@ class DigitalVCRApp:
             return
         seq = int(getattr(self, "_live_publish_seq", 0)) + 1
         self._live_publish_seq = seq
-        self._latest_live_frame = frame
+        session_id = int(getattr(self, "_live_session_id", 0))
+        use_integrated_crt = False
+        use_any_crt = False
         try:
             settings = getattr(self, "_cached_crt_settings", getattr(self, "crt_settings", consumer_tv_preset())).validated()
-            if settings.enabled and (settings.live_enabled or settings.direct_live):
-                _put_latest(self._live_crt_q, (seq, frame.copy()))
+            use_integrated_crt = bool(settings.enabled and settings.live_enabled)
+            use_any_crt = bool(settings.enabled and (settings.live_enabled or settings.direct_live))
+            if use_any_crt:
+                _put_latest(self._live_crt_q, (session_id, seq, frame.copy()))
         except Exception:
             pass
+        if not use_integrated_crt:
+            self._latest_live_frame = frame
 
-    def _publish_live_crt_frame(self, seq: int, frame: np.ndarray | None):
+    def _publish_live_crt_frame(self, session_id: int, seq: int, frame: np.ndarray | None):
         if frame is None or not getattr(self, "_live_on", False):
             return
-        if int(seq) != int(getattr(self, "_live_publish_seq", seq)):
+        if int(session_id) != int(getattr(self, "_live_session_id", 0)):
             return
+        seq = int(seq)
+        if seq <= int(getattr(self, "_live_crt_published_seq", 0)):
+            return
+        self._live_crt_published_seq = seq
         self._latest_live_frame = frame
+
+    def _prepare_live_player_for_decode(self):
+        try:
+            state = self.live_player.state
+            state.inserting_timer = max(float(getattr(state, "inserting_timer", 0.0)), 1.2)
+            state.lock = max(float(getattr(state, "lock", 0.0)), 0.95)
+            state.cut_black_timer = 0.0
+            state.switch_confuse_timer = 0.0
+        except Exception:
+            pass
 
     def _mark_live_stopped_from_worker(self):
         try:
@@ -2185,14 +2495,18 @@ class DigitalVCRApp:
                     item = self._live_crt_q.get(timeout=0.05)
                 except queue.Empty:
                     continue
-                if isinstance(item, tuple) and len(item) == 2:
+                if isinstance(item, tuple) and len(item) == 3:
+                    session_id, seq, frame = item
+                elif isinstance(item, tuple) and len(item) == 2:
+                    session_id = int(getattr(self, "_live_session_id", 0))
                     seq, frame = item
                 else:
+                    session_id = int(getattr(self, "_live_session_id", 0))
                     seq, frame = 0, item
                 if frame is None or not getattr(self, "_live_on", False):
                     continue
                 out = self._apply_crt_to_frame(frame, "live")
-                self._publish_live_crt_frame(seq, out)
+                self._publish_live_crt_frame(session_id, seq, out)
             except Exception:
                 try:
                     self._live_worker_error = traceback.format_exc()
@@ -2221,6 +2535,7 @@ class DigitalVCRApp:
 
                     self.live_player.insert()
                     self.live_player.play()
+                    self._prepare_live_player_for_decode()
                     self._live_seg_id = int(time.time()*1000) & 0x7fffffff
                     self._live_frame_idx = 0
                     self._live_write_base = 0
@@ -2229,8 +2544,8 @@ class DigitalVCRApp:
 
                 # snapshot defs/options (worker never touches Tk vars)
                 with self.lock:
-                    rec_def = getattr(self, "_cached_rec_def", self.rec_def)
-                    pb_def = getattr(self, "_cached_pb_def", self.pb_def)
+                    rec_def = getattr(self, "_cached_live_rec_def", getattr(self, "live_rec_def", self.rec_def))
+                    pb_def = getattr(self, "_cached_live_pb_def", getattr(self, "live_pb_def", self.pb_def))
                     opts = self.rec_opts
                     tape = self._live_tape
 
@@ -2320,6 +2635,7 @@ class DigitalVCRApp:
                             except Exception:
                                 pass
 
+                        self._prepare_live_player_for_decode()
                         out = self.live_player.get_frame(tape, pb_def)
                         self._publish_live_frame(out)
                         self._live_write_base = int(base + 2)
@@ -2442,6 +2758,7 @@ class DigitalVCRApp:
                 except Exception:
                     pass
 
+                self._prepare_live_player_for_decode()
                 out = self.live_player.get_frame(tape, pb_def)
                 self._publish_live_frame(out)
                 self._live_write_base = int(base + 2)
