@@ -1,8 +1,8 @@
-<<<<<<< HEAD
+
 # Digital VCR (V7_1)
 =======
 # Digital VCR (V7)
->>>>>>> fc1237783e7f6deb587991a8ec47eab258c730a0
+
 
 A desktop VHS-style video recorder, live camera processor, CRT display simulator, and MP4 exporter built with CustomTkinter, OpenCV, NumPy, ModernGL, and GLFW.
 
@@ -19,7 +19,7 @@ V7_1 focuses on live-mode stability, simpler camera input selection, CRT thread 
 - Windows built-in audio playback plus MP4 export with optional audio mux.
 - Backward-compatible bundle loading for older tape bundle layouts.
 
-<<<<<<< HEAD
+
 ## V7_1 Updates
 
 - Simplified Live camera selection back to plain camera indexes such as `0`, `1`, and `2`.
@@ -54,7 +54,6 @@ V7_1 focuses on live-mode stability, simpler camera input selection, CRT thread 
 - Removed duplicated ffmpeg audio extraction during recording for faster record startup and lower CPU/disk load.
 - Fixed live-mode status updates and camera release behavior.
 
->>>>>>> fc1237783e7f6deb587991a8ec47eab258c730a0
 
 ## Run
 
@@ -143,11 +142,11 @@ The loader still supports older bundle layouts, including legacy single-file `ta
 - Tape audio is stored compactly when possible and decoded back in memory on load.
 - Export can generate video-only or muxed video+audio outputs.
 
-<<<<<<< HEAD
+
 ## Project Structure
 =======
 ## Project structure
->>>>>>> fc1237783e7f6deb587991a8ec47eab258c730a0
+
 
 ```text
 main.py
