@@ -1,10 +1,6 @@
 # Digital VCR (V8.0)
 
 
-A desktop VHS-style video recorder, live camera processor, CRT display simulator, and MP4 exporter built with CustomTkinter, OpenCV, NumPy, ModernGL, and GLFW.
-
-V8.0 focuses on live-mode stability, simpler camera input selection, CRT thread safety, and a smoother desktop UI.
-
 ## Highlights
 
 - Recorder, Player, VHS Tape, CRT TV, and Live pages in one desktop app.
@@ -18,8 +14,6 @@ V8.0 focuses on live-mode stability, simpler camera input selection, CRT thread 
 
 
 ## V8.0 Updates
-
-- Restored the missing CRT TV application wiring on top of the optimized playback/RF branch: Player preview, Live preview, direct OpenGL windows, settings persistence, and CRT-baked exports are connected again.
 - Fixed the CRT phosphor-history path so previous-frame history is copied framebuffer-to-framebuffer entirely on the GPU instead of falling back to a GPU→CPU→GPU round-trip every frame.
 - CRT source upload can now use texture channel swizzling to consume OpenCV BGR frames directly, avoiding a full-frame BGR→RGB allocation on supported OpenGL drivers.
 - Static CRT shader uniforms are cached and resent only when settings/resolution change; the shader equations and visual model are unchanged.
