@@ -13,22 +13,54 @@ We still store results in the same tape format (dphi8 + c_u8), so playback stays
 """
 
 import numpy as np
+from functools import lru_cache
 
 from .defects import mode_scale
+from .native_core import interp_rows_f32
+
+
+def _smooth_noise_rows(rows: int, n: int, coarse: int = 32) -> np.ndarray:
+    """Return ``rows`` smooth noise signals in [-1, 1].
+
+    Random samples are generated in one contiguous call. With NumPy's legacy
+    global RNG this consumes the same random sequence as the former per-row
+    calls. Interpolation can be handled by the optional Rust core, while the
+    normalization remains NumPy so the signal model is unchanged.
+    """
+    rows = int(max(1, rows))
+    n = int(max(1, n))
+    coarse = int(max(4, min(coarse, n)))
+
+    knots = np.random.randn(rows, coarse).astype(np.float32)
+    knots -= knots.mean(axis=1, keepdims=True)
+    knots /= (knots.std(axis=1, keepdims=True) + 1e-6)
+
+    xk = np.linspace(0, n - 1, coarse, dtype=np.float32)
+    x = np.arange(n, dtype=np.float32)
+    y = interp_rows_f32(knots, xk, x)
+    scale = np.max(np.abs(y), axis=1, keepdims=True) + 1e-6
+    return np.clip(y / scale, -1.0, 1.0).astype(np.float32, copy=False)
 
 
 def _smooth_noise_1d(n: int, coarse: int = 32) -> np.ndarray:
-    """Return smooth-ish noise in [-1,1] (linear-interp of coarse random knots)."""
-    n = int(max(1, n))
-    coarse = int(max(4, min(coarse, n)))
-    knots = np.random.randn(coarse).astype(np.float32)
-    knots -= knots.mean()
-    knots /= (knots.std() + 1e-6)
-    xk = np.linspace(0, n - 1, coarse, dtype=np.float32)
-    x = np.arange(n, dtype=np.float32)
-    y = np.interp(x, xk, knots).astype(np.float32)
-    y = np.clip(y / (np.max(np.abs(y)) + 1e-6), -1.0, 1.0)
-    return y
+    return _smooth_noise_rows(1, n, coarse)[0]
+
+
+@lru_cache(maxsize=16)
+def _chroma_carrier(n: int, fc: float) -> np.ndarray:
+    """Cache the deterministic color-under carrier used by repeated fields."""
+    ph = (2.0 * np.pi * float(fc) * np.arange(int(n), dtype=np.float32)).astype(np.float32)
+    carrier = np.cos(ph).astype(np.float32) + 1j * np.sin(ph).astype(np.complex64)
+    carrier = carrier.astype(np.complex64, copy=False)
+    carrier.setflags(write=False)
+    return carrier
+
+
+@lru_cache(maxsize=24)
+def _moving_average_kernel(k: int) -> np.ndarray:
+    ker = np.ones((int(k),), dtype=np.float32) / float(k)
+    ker.setflags(write=False)
+    return ker
 
 
 def _u8_to_dphi(y_dphi8: np.ndarray, dphi_min: float, dphi_max: float) -> np.ndarray:
@@ -88,7 +120,7 @@ def rf_roundtrip_luma_dphi_u8(
     pn_eff = pn * pn * (3.0 - 2.0 * pn)  # smoothstep
     if pn_eff > 1e-6:
         # smooth noise per-line
-        jit = np.stack([_smooth_noise_1d(y_mod_w, coarse=max(8, y_mod_w // 20)) for _ in range(int(y_h))], axis=0)
+        jit = _smooth_noise_rows(int(y_h), y_mod_w, coarse=max(8, y_mod_w // 20))
         phase = phase + (jit * (0.10 * pn_eff) * (1.0 + 0.8 * s)).astype(np.float32)
 
     i = np.cos(phase)
@@ -98,7 +130,7 @@ def rf_roundtrip_luma_dphi_u8(
     a = float(np.clip(am_depth, 0.0, 1.0))
     a_eff = a * a * (3.0 - 2.0 * a)  # smoothstep
     if a_eff > 1e-6:
-        env = np.stack([_smooth_noise_1d(y_mod_w, coarse=max(8, y_mod_w // 24)) for _ in range(int(y_h))], axis=0)
+        env = _smooth_noise_rows(int(y_h), y_mod_w, coarse=max(8, y_mod_w // 24))
         # No "always-on" baseline: effect strength is proportional to slider value.
         env = 1.0 + (env * (0.55 * a_eff) * (1.0 + 0.6 * s))
         i = (i * env).astype(np.float32)
@@ -194,8 +226,7 @@ def rf_roundtrip_chroma_u8(
 
     n = bb.size
     fc = float(np.clip(fc_frac, 0.01, 0.49))
-    ph = (2.0 * np.pi * fc * np.arange(n, dtype=np.float32)).astype(np.float32)
-    carrier = np.cos(ph).astype(np.float32) + 1j * np.sin(ph).astype(np.complex64)
+    carrier = _chroma_carrier(int(n), float(fc))
     z = (bb.astype(np.complex64) * carrier)
 
     # Phase noise
@@ -251,7 +282,7 @@ def rf_roundtrip_chroma_u8(
         k = int(3 + lp * 19)
         if k % 2 == 0:
             k += 1
-        ker = (np.ones((k,), dtype=np.float32) / float(k))
+        ker = _moving_average_kernel(k)
         zr = np.convolve(zbb.real.astype(np.float32), ker, mode="same")
         zi = np.convolve(zbb.imag.astype(np.float32), ker, mode="same")
         zbb = (zr + 1j * zi).astype(np.complex64)

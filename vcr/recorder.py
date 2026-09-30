@@ -30,7 +30,9 @@ class RecordOptions:
     use_src_timestamps: bool = True
 
     # Encoding threads for record_from_file.
-    # 0 = auto (min(max(2, cpu//2), 8)), 1 = single-thread, >1 = ThreadPoolExecutor workers.
+    # 0 = auto. The auto policy deliberately uses one worker for Real-RF mode
+    # because the RF path is memory-bandwidth heavy and additional frame workers
+    # can reduce throughput. Explicit user values are always respected.
     encode_threads: int = 0
 
 
@@ -297,8 +299,15 @@ class Recorder:
         src_idx = 0
         src_time = _cap_time_sec(cap, src_idx, src_fps, bool(getattr(opts, 'use_src_timestamps', True)))
 
-        # Threading controls
-        enc_threads = _auto_encode_threads(int(getattr(opts, 'encode_threads', 0)))
+        # Threading controls. Real-RF is dominated by large NumPy/OpenCV buffers;
+        # oversubscribing whole frames competes for memory bandwidth and is slower
+        # on typical desktop CPUs. Keep Auto conservative without changing an
+        # explicitly requested worker count.
+        requested_threads = int(getattr(opts, 'encode_threads', 0))
+        if requested_threads == 0 and bool(getattr(rec_def, 'real_rf_modulation', False)):
+            enc_threads = 1
+        else:
+            enc_threads = _auto_encode_threads(requested_threads)
         use_mt = bool(enc_threads > 1)
         max_inflight = int(max(4, enc_threads * 3))
 
@@ -312,8 +321,7 @@ class Recorder:
         # Helpers for write-back + UI callbacks (runs on the caller thread)
         def _write_one(fi: int, bt: int, tr0: TapeTrack, tr1: TapeTrack):
             nonlocal written_frames, endpos
-            tape.cart.set(bt, tr0)
-            tape.cart.set(bt + 1, tr1)
+            tape.cart.set_pair(bt, tr0, tr1)
 
             # --- Audio overwrite for this frame ---
             if tape.audio.pcm16 is not None:

@@ -15,6 +15,19 @@ from .defects import (
     apply_image_controls, apply_scanlines, apply_scanline_soften
 )
 
+def _playback_interference_strength(pb: PlaybackDefects, *, sync: float, stress: float, gate: float) -> float:
+    """Compute playback interference while preserving the existing non-zero model.
+
+    The amount slider is a true master amount: at exactly zero there is no
+    interference. For every non-zero amount the previous formula is retained.
+    """
+    amount = float(getattr(pb, "interference", 0.0))
+    if amount <= 0.0:
+        return 0.0
+    value = amount * (0.55 + 0.85 * float(stress)) + 0.25 * (1.0 - float(sync))
+    return float(np.clip(value, 0.0, 1.0)) * float(gate)
+
+
 @dataclass
 class ServoState:
     inserted: bool = False
@@ -144,24 +157,51 @@ class VCRPlayer:
         # Fallback for legacy bundles: assume even/odd pairing.
         return int(i - (i % 2))
 
-    def _cache_get(self, idx: int, token: int):
-        """Return cached decoded field if it matches the current track object.
+    def _cache_get(self, idx: int, token: tuple, signature: tuple):
+        """Return a decoded field only when both track and decode settings match.
 
-        In Live mode we overwrite the same track indices in a ring buffer;
-        without a token check we'd show stale (ghost) frames.
-"""
+        Live mode overwrites ring-buffer track indices, while the Player UI can
+        change RF/recombination controls without moving the playhead. Both must
+        invalidate a cached decode or the preview can appear frozen/stale.
+        """
         if idx in self._cache:
-            tok, val = self._cache.pop(idx)
-            if tok == token:
-                self._cache[idx] = (tok, val)
+            tok, sig, val = self._cache.pop(idx)
+            if tok == token and sig == signature:
+                self._cache[idx] = (tok, sig, val)
                 return val
-            # track was overwritten -> drop stale entry
         return None
 
-    def _cache_put(self, idx: int, token: int, val):
-        self._cache[idx] = (token, val)
+    def _cache_put(self, idx: int, token: tuple, signature: tuple, val):
+        self._cache[idx] = (token, signature, val)
         while len(self._cache) > self._cache_cap:
             self._cache.popitem(last=False)
+
+    @staticmethod
+    def _decode_signature(tr, pb: PlaybackDefects) -> tuple:
+        """Settings that materially affect the cached field decode.
+
+        Dynamic servo state is intentionally not included: the historic player
+        cached the first decode of a track, which makes tape defects spatially
+        stable. This only fixes stale cache entries after an actual control change.
+        """
+        m = tr.meta
+        return (
+            bool(m.get("real_rf_modulation", False)),
+            str(m.get("tape_mode", "SP")),
+            float(m.get("rf_fm_depth", 1.0)),
+            float(m.get("rf_chroma_fc_frac", 0.12)),
+            float(m.get("rf_chroma_lpf", 0.35)),
+            float(getattr(pb, "playback_rf_noise", 0.0)),
+            float(getattr(pb, "playback_dropouts", 0.0)),
+            float(getattr(pb, "chroma_noise", 0.0)),
+            float(getattr(pb, "luma_chroma_bleed", 0.0)),
+            bool(getattr(pb, "rf_playback_model", False)),
+            float(getattr(pb, "rf_playback_fm_depth", 1.0)),
+            float(getattr(pb, "rf_playback_am_depth", 0.18)),
+            float(getattr(pb, "rf_playback_nonlinearity", 0.20)),
+            float(getattr(pb, "rf_playback_carrier_noise", 0.20)),
+            float(getattr(pb, "rf_playback_phase_noise", 0.12)),
+        )
 
     def insert(self):
         s = self.state
@@ -370,13 +410,15 @@ class VCRPlayer:
         s._last_vjit = vjit
         s._last_sync = sync
 
-    def _decode_track_with_rf(self, tape: TapeImage, idx: int, pb: PlaybackDefects):
-        tr = tape.cart.get(idx)
+    def _decode_track_with_rf(self, tape: TapeImage, idx: int, pb: PlaybackDefects, tr=None):
+        if tr is None:
+            tr = tape.cart.get(idx)
         if tr is None:
             return None
 
-        token = id(tr)
-        cached = self._cache_get(idx, token)
+        token = (id(tr), id(tr.y_dphi8), id(tr.c_u8))
+        signature = self._decode_signature(tr, pb)
+        cached = self._cache_get(idx, token, signature)
         if cached is not None:
             return cached
 
@@ -435,7 +477,7 @@ class VCRPlayer:
             c = apply_rf_defects_chroma_u8(tr.c_u8, rf_noise * (0.8 + pb.chroma_noise), dropouts, mode)
 
         img = decode_field_bgr(y, c, tr.meta, bleed=float(getattr(pb, 'luma_chroma_bleed', 0.0)))
-        self._cache_put(idx, token, img)
+        self._cache_put(idx, token, signature, img)
         return img
 
     def get_frame(self, tape: TapeImage, pb: PlaybackDefects) -> np.ndarray:
@@ -453,8 +495,9 @@ class VCRPlayer:
 
         # Pair fields to their recorded frame boundary to avoid weaving mismatched fields.
         base = self._pair_base(tape, int(s.pos_tracks))
-        f0 = self._decode_track_with_rf(tape, base, pb)
-        f1 = self._decode_track_with_rf(tape, base+1, pb)
+        tr0, tr1 = tape.cart.get_pair(base)
+        f0 = self._decode_track_with_rf(tape, base, pb, tr=tr0)
+        f1 = self._decode_track_with_rf(tape, base+1, pb, tr=tr1)
         if f0 is None or f1 is None:
             return np.zeros((480, 640, 3), dtype=np.uint8)
 
@@ -561,7 +604,9 @@ class VCRPlayer:
         csy = (pb.chroma_shift_y * (1.0 + 1.7*conf)) + (0.25*wob) * wob_c
         frame = apply_chroma_shift(frame, csx, csy, wob_phase, ch_noise + 0.55*conf)
         stress2 = float(np.clip(0.55*(1.0-lock) + 0.35*tracking_err + 0.25*conf, 0.0, 1.0))
-        intf_strength = float(np.clip(pb.interference*(0.55 + 0.85*stress2) + 0.25*(1.0-sync), 0.0, 1.0)) * float(getattr(s, "intf_gate", 1.0))
+        intf_strength = _playback_interference_strength(
+            pb, sync=sync, stress=stress2, gate=float(getattr(s, "intf_gate", 1.0))
+        )
 
         frame = apply_interference(frame, intf_strength, variance=getattr(pb, 'variance', 0.55))
 

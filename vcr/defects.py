@@ -4,6 +4,8 @@ from typing import Dict, Any
 import numpy as np
 import cv2
 
+from .native_core import shift_rows_zero_u8
+
 @dataclass
 class RecordDefects:
     tape_mode: str = "SP"
@@ -140,14 +142,9 @@ def apply_record_defects_to_field(field_bgr: np.ndarray, rec: RecordDefects) -> 
         h, w = out.shape[:2]
         max_shift = int(1 + jit * 6)
         shifts = (np.random.randn(h).astype(np.float32) * max_shift).astype(np.int32)
-        tmp = np.zeros_like(out)
-        for y in range(h):
-            sh = shifts[y]
-            if sh >= 0:
-                tmp[y, sh:] = out[y, :w-sh]
-            else:
-                tmp[y, :w+sh] = out[y, -sh:]
-        out = tmp
+        # Exact same zero-filled per-row shift as the original Python loop.
+        # The optional Rust core only accelerates the memory copies.
+        out = shift_rows_zero_u8(out, shifts)
     return out
 
 def apply_rf_defects_y_dphi_u8(y_dphi8: np.ndarray, noise: float, dropouts: float, mode: str = "SP", lock: float = 1.0) -> np.ndarray:
@@ -220,7 +217,6 @@ def apply_timebase_wobble(frame_bgr: np.ndarray, strength: float, lock: float, g
         return img
 
     h, w = img.shape[:2]
-    out = np.zeros_like(img)
     t = np.linspace(0, 1, h, dtype=np.float32)
     # Avoid 'baked-in' jitter when the servo is locked: scale wobble by (1-lock).
     stress = float(np.clip(1.0 - float(lock), 0.0, 1.0))
@@ -230,12 +226,7 @@ def apply_timebase_wobble(frame_bgr: np.ndarray, strength: float, lock: float, g
     jitter = (np.random.randn(h).astype(np.float32)
               * (1.5 + 10.0*strength) * (stress ** 1.20))
     shifts = (lf + jitter).astype(np.int32)
-    for y in range(h):
-        sft = shifts[y]
-        if sft >= 0:
-            out[y, sft:] = img[y, :w-sft]
-        else:
-            out[y, :w+sft] = img[y, -sft:]
+    out = shift_rows_zero_u8(img, shifts)
 
     if lock < 0.7 and strength > 0.2 and np.random.rand() < (0.04 + 0.18*(1.0-lock)):
         roll = int((1.0-lock) * strength * 30)
@@ -340,6 +331,11 @@ def enforce_aspect(img: np.ndarray, aspect_display: str) -> np.ndarray:
         return cv2.copyMakeBorder(img, 0, 0, left, right, borderType=cv2.BORDER_CONSTANT, value=(0,0,0))
 
 def apply_image_controls(frame_bgr: np.ndarray, brightness: float, contrast: float, saturation: float, bloom: float, sharpen: float) -> np.ndarray:
+    # Avoid a full-frame float conversion when every control is neutral.
+    if (abs(float(brightness)) <= 1e-4 and abs(float(contrast)) <= 1e-4
+            and abs(float(saturation)) <= 1e-4 and float(bloom) <= 0.0
+            and float(sharpen) <= 0.0):
+        return frame_bgr
     img = frame_bgr.astype(np.float32) / 255.0
     if abs(brightness) > 1e-4 or abs(contrast) > 1e-4:
         img = (img - 0.5) * (1.0 + 2.0*contrast) + 0.5 + 0.25*brightness

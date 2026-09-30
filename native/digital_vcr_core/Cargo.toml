@@ -1,0 +1,15 @@
+[package]
+name = "digital_vcr_core"
+version = "0.1.0"
+edition = "2021"
+description = "Narrow native acceleration kernels for Digital VCR"
+license-file = "LICENSE"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+panic = "abort"

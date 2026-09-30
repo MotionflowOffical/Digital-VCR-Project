@@ -9,6 +9,11 @@ if (-not (Test-Path .venv)) {
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 pip install -r requirements-build.txt
+if (Get-Command cargo -ErrorAction SilentlyContinue) {
+    & .\build_native.ps1
+} else {
+    Write-Host 'Rust toolchain not found - building Python-fallback version.'
+}
 pyinstaller --noconfirm digital_vcr.spec
 
 Write-Host ""

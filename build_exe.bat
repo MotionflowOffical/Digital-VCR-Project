@@ -14,6 +14,13 @@ call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 pip install -r requirements-build.txt
+where cargo >nul 2>nul
+if not errorlevel 1 (
+  call build_native.bat
+  if errorlevel 1 exit /b %errorlevel%
+) else (
+  echo Rust toolchain not found - building Python-fallback version.
+)
 python -m PyInstaller --clean --noconfirm digital_vcr.spec
 if errorlevel 1 exit /b %errorlevel%
 

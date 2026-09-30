@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules, collect_dynamic_libs, collect_data_files
+from pathlib import Path
 
 block_cipher = None
 
@@ -7,6 +8,8 @@ hiddenimports = []
 hiddenimports += collect_submodules('vcr')
 hiddenimports += collect_submodules('PIL')
 hiddenimports += collect_submodules('customtkinter')
+hiddenimports += collect_submodules('moderngl')
+hiddenimports += collect_submodules('glfw')
 hiddenimports += [
     'tkinter',
     'tkinter.ttk',
@@ -15,6 +18,8 @@ hiddenimports += [
     'cv2',
     'numpy',
     'imageio_ffmpeg',
+    'moderngl',
+    'glfw',
 ]
 
 datas = []
@@ -23,6 +28,11 @@ datas += collect_data_files('customtkinter')
 
 binaries = []
 binaries += collect_dynamic_libs('cv2')
+binaries += collect_dynamic_libs('moderngl')
+binaries += collect_dynamic_libs('glfw')
+native_dll = Path('vcr/native/digital_vcr_core.dll')
+if native_dll.exists():
+    binaries.append((str(native_dll), 'vcr/native'))
 
 a = Analysis(
     ['main.py'],

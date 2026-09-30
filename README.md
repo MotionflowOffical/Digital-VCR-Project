@@ -1,9 +1,9 @@
-# Digital VCR (V7_1)
+# Digital VCR (V8.0)
 
 
 A desktop VHS-style video recorder, live camera processor, CRT display simulator, and MP4 exporter built with CustomTkinter, OpenCV, NumPy, ModernGL, and GLFW.
 
-V7_1 focuses on live-mode stability, simpler camera input selection, CRT thread safety, and a smoother desktop UI.
+V8.0 focuses on live-mode stability, simpler camera input selection, CRT thread safety, and a smoother desktop UI.
 
 ## Highlights
 
@@ -17,17 +17,21 @@ V7_1 focuses on live-mode stability, simpler camera input selection, CRT thread 
 - Backward-compatible bundle loading for older tape bundle layouts.
 
 
-## V7_1 Updates
+## V8.0 Updates
 
+- Restored the missing CRT TV application wiring on top of the optimized playback/RF branch: Player preview, Live preview, direct OpenGL windows, settings persistence, and CRT-baked exports are connected again.
+- Fixed the CRT phosphor-history path so previous-frame history is copied framebuffer-to-framebuffer entirely on the GPU instead of falling back to a GPU→CPU→GPU round-trip every frame.
+- CRT source upload can now use texture channel swizzling to consume OpenCV BGR frames directly, avoiding a full-frame BGR→RGB allocation on supported OpenGL drivers.
+- Static CRT shader uniforms are cached and resent only when settings/resolution change; the shader equations and visual model are unchanged.
+- CRT remains GPU-native; the optional Rust core is used only for CPU-side VHS/RF hot loops where it provides a measurable benefit.
 - Simplified Live camera selection back to plain camera indexes such as `0`, `1`, and `2`.
 - Camera refresh discovers connected inputs in a background worker so the UI does not freeze.
 - Camera backend fallback now happens internally instead of cluttering the dropdown with backend names.
 - Live mode no longer turns brief camera read hiccups into periodic static bursts; short misses are dropped, sustained loss still triggers signal-loss behavior.
 - Live on/off no longer blocks the UI while waiting for camera release.
-- Live processing uses a bounded latest-frame queue so stale camera frames are dropped instead of piling up.
-- Safe OpenCL/UMat preprocessing is used for live resize when available, with CPU fallback.
+- Live CRT processing uses a bounded latest-frame queue so stale GPU jobs are dropped instead of piling up.
+- Live preprocessing uses one shared resize/even-field path; OpenCV can be extended to OpenCL/UMat without changing the tape equations.
 - CRT output remains isolated through the CRT renderer thread; no Live worker touches ModernGL or GLFW directly.
-- Removed the expensive per-pixel gradient redraw from the app shell to reduce resize, drag, and scroll lag.
 - Updated CRT and Live setting help text.
 
 ## Previous Updates
@@ -158,6 +162,9 @@ vcr/
   editor.py
   exporter.py
   modulation.py
+  native_core.py
+  native/
+    digital_vcr_core.dll   # generated on Windows after build_native.bat
   player.py
   recorder.py
   rf_model.py
@@ -165,6 +172,34 @@ vcr/
   gui/
     app.py
 
+native/
+  digital_vcr_core/
+    Cargo.toml
+    src/lib.rs
+
 tools/
   capture_screen.py
 ```
+## Optional Rust Native Core
+
+Digital VCR can use a small Rust native library for hot loops that were previously
+executed in Python. The signal model itself remains in the existing Python/NumPy/
+OpenCV pipeline; the native core currently accelerates exact row-shift copies and
+RF smooth-noise interpolation.
+
+On Windows, install the Rust toolchain, then run:
+
+```bat
+build_native.bat
+```
+
+This places `digital_vcr_core.dll` in `vcr/native/`. `build_exe.bat` and
+`build_exe.ps1` automatically build and package the native core when `cargo` is
+available. If the DLL is missing or fails its runtime numerical self-check, the
+application automatically uses the Python reference implementation instead.
+
+The performance changes are designed not to reduce simulation quality: the RF
+noise batching consumes the same NumPy random sequence as the former per-scanline
+implementation, and the native path is guarded against numerical divergence.
+Playback also uses deadline-based 30 fps pacing so render time is counted inside
+the frame budget rather than added on top of a fixed 33 ms sleep.

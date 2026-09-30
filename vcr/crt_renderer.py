@@ -198,11 +198,14 @@ class _ModernGLCRTBackend:
         self.source_tex = None
         self.color_tex = None
         self.prev_tex = None
+        self.prev_fbo = None
         self.fbo = None
         self.size = (0, 0)
+        self._source_bgr_swizzle = False
+        self._uniform_key = None
 
     def release(self):
-        for obj in (self.fbo, self.color_tex, self.prev_tex, self.source_tex, self.vao, self.vbo, self.program):
+        for obj in (self.fbo, self.prev_fbo, self.color_tex, self.prev_tex, self.source_tex, self.vao, self.vbo, self.program):
             try:
                 if obj is not None:
                     obj.release()
@@ -214,7 +217,7 @@ class _ModernGLCRTBackend:
         height = int(max(1, height))
         if self.size == (width, height) and self.fbo is not None:
             return
-        for obj in (self.fbo, self.color_tex, self.prev_tex):
+        for obj in (self.fbo, self.prev_fbo, self.color_tex, self.prev_tex):
             try:
                 if obj is not None:
                     obj.release()
@@ -226,11 +229,22 @@ class _ModernGLCRTBackend:
         self.prev_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
         self.prev_tex.write(bytes(width * height * 4))
         self.fbo = self.ctx.framebuffer(color_attachments=[self.color_tex])
+        # A texture is not a valid destination for Context.copy_framebuffer().
+        # The previous implementation therefore fell through to a full GPU->CPU
+        # readback and CPU->GPU upload on every frame.  Attach the history
+        # texture to its own FBO so persistence stays entirely on the GPU.
+        self.prev_fbo = self.ctx.framebuffer(color_attachments=[self.prev_tex])
         self.size = (width, height)
 
     def _upload_source(self, frame_bgr: np.ndarray):
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
+        # OpenCV frames are BGR.  ModernGL textures can swizzle channels while
+        # sampling, so upload the contiguous BGR bytes directly and expose them
+        # to the shader as RGB.  This removes one full-frame cvtColor allocation
+        # without changing sampled values.  Fall back to the old conversion on
+        # drivers/backends that do not expose texture swizzles.
+        if not frame_bgr.flags.c_contiguous:
+            frame_bgr = np.ascontiguousarray(frame_bgr)
+        h, w = frame_bgr.shape[:2]
         if self.source_tex is not None:
             try:
                 if self.source_tex.size != (w, h):
@@ -241,32 +255,53 @@ class _ModernGLCRTBackend:
         if self.source_tex is None:
             self.source_tex = self.ctx.texture((w, h), 3)
             self.source_tex.filter = (self.ctx.LINEAR, self.ctx.LINEAR)
-        self.source_tex.write(rgb.tobytes(), alignment=1)
+            self._source_bgr_swizzle = False
+            try:
+                self.source_tex.swizzle = "BGR1"
+                self._source_bgr_swizzle = True
+            except Exception:
+                self._source_bgr_swizzle = False
+        if self._source_bgr_swizzle:
+            self.source_tex.write(frame_bgr.tobytes(), alignment=1)
+        else:
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            self.source_tex.write(rgb.tobytes(), alignment=1)
 
-    def _set_uniforms(self, frame_bgr: np.ndarray, settings: CRTSettings, width: int, height: int):
-        s = settings.validated()
+    def _set_uniforms(self, frame_bgr: np.ndarray, s: CRTSettings, width: int, height: int):
+        # Everything except time is static until the CRT settings or frame/target
+        # dimensions change.  Avoid ~20 Python->OpenGL uniform calls per frame.
         mask_id = {"aperture": 0, "slot": 1, "shadow": 2}.get(s.mask_type, 1)
-        self.program["u_source"].value = 0
-        self.program["u_prev"].value = 1
-        self.program["u_input_size"].value = (float(frame_bgr.shape[1]), float(frame_bgr.shape[0]))
-        self.program["u_output_size"].value = (float(width), float(height))
+        key = (
+            int(frame_bgr.shape[1]), int(frame_bgr.shape[0]), int(width), int(height), int(mask_id),
+            float(s.mask_strength), float(s.scanline_strength), float(s.beam_sharpness),
+            float(s.bloom), float(s.halation), float(s.glass_diffusion), float(s.curvature),
+            float(s.overscan), float(s.vignette), float(s.edge_focus), float(s.phosphor_decay),
+            float(s.convergence_x), float(s.convergence_y), float(s.brightness),
+            float(s.contrast), float(s.saturation),
+        )
+        if key != self._uniform_key:
+            self.program["u_source"].value = 0
+            self.program["u_prev"].value = 1
+            self.program["u_input_size"].value = (float(frame_bgr.shape[1]), float(frame_bgr.shape[0]))
+            self.program["u_output_size"].value = (float(width), float(height))
+            self.program["u_mask_type"].value = int(mask_id)
+            self.program["u_mask_strength"].value = float(s.mask_strength)
+            self.program["u_scanline_strength"].value = float(s.scanline_strength)
+            self.program["u_beam_sharpness"].value = float(s.beam_sharpness)
+            self.program["u_bloom"].value = float(s.bloom)
+            self.program["u_halation"].value = float(s.halation)
+            self.program["u_glass_diffusion"].value = float(s.glass_diffusion)
+            self.program["u_curvature"].value = float(s.curvature)
+            self.program["u_overscan"].value = float(s.overscan)
+            self.program["u_vignette"].value = float(s.vignette)
+            self.program["u_edge_focus"].value = float(s.edge_focus)
+            self.program["u_decay"].value = float(s.phosphor_decay)
+            self.program["u_convergence"].value = (float(s.convergence_x), float(s.convergence_y))
+            self.program["u_brightness"].value = float(s.brightness)
+            self.program["u_contrast"].value = float(s.contrast)
+            self.program["u_saturation"].value = float(s.saturation)
+            self._uniform_key = key
         self.program["u_time"].value = float(time.perf_counter())
-        self.program["u_mask_type"].value = int(mask_id)
-        self.program["u_mask_strength"].value = float(s.mask_strength)
-        self.program["u_scanline_strength"].value = float(s.scanline_strength)
-        self.program["u_beam_sharpness"].value = float(s.beam_sharpness)
-        self.program["u_bloom"].value = float(s.bloom)
-        self.program["u_halation"].value = float(s.halation)
-        self.program["u_glass_diffusion"].value = float(s.glass_diffusion)
-        self.program["u_curvature"].value = float(s.curvature)
-        self.program["u_overscan"].value = float(s.overscan)
-        self.program["u_vignette"].value = float(s.vignette)
-        self.program["u_edge_focus"].value = float(s.edge_focus)
-        self.program["u_decay"].value = float(s.phosphor_decay)
-        self.program["u_convergence"].value = (float(s.convergence_x), float(s.convergence_y))
-        self.program["u_brightness"].value = float(s.brightness)
-        self.program["u_contrast"].value = float(s.contrast)
-        self.program["u_saturation"].value = float(s.saturation)
 
     def _render_to_fbo(self, frame_bgr: np.ndarray, settings: CRTSettings, width: int, height: int):
         self._ensure_targets(width, height)
@@ -279,8 +314,10 @@ class _ModernGLCRTBackend:
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.vao.render(mode=self.ctx.TRIANGLE_STRIP)
         try:
-            self.ctx.copy_framebuffer(self.prev_tex, self.fbo)
+            self.ctx.copy_framebuffer(self.prev_fbo, self.fbo)
         except Exception:
+            # Compatibility fallback only.  Normal ModernGL backends use the
+            # GPU-side framebuffer copy above and never cross the PCIe bus here.
             data = self.fbo.read(components=4, alignment=1)
             self.prev_tex.write(data, alignment=1)
 
@@ -290,8 +327,10 @@ class _ModernGLCRTBackend:
         settings: CRTSettings,
         output_size: tuple[int, int] | None = None,
     ) -> np.ndarray:
-        s = settings.validated()
-        width, height = s.render_size_for(frame_bgr.shape)
+        s = settings
+        fh, fw = int(frame_bgr.shape[0]), int(frame_bgr.shape[1])
+        width = int(s.render_width)
+        height = int(max(1, round(fh * (width / float(max(1, fw))))))
         self._render_to_fbo(frame_bgr, s, width, height)
         data = self.fbo.read(components=3, alignment=1)
         rgb = np.frombuffer(data, dtype=np.uint8).reshape((height, width, 3))
@@ -325,10 +364,20 @@ class CRTFrameRenderer:
 
     def _start(self):
         with self._lock:
-            if self._thread is not None:
+            if self._thread is not None and self._thread.is_alive() and self._ready.is_set() and not self._error:
                 return
-            self._thread = threading.Thread(target=self._thread_main, name="CRTFrameRenderer", daemon=True)
-            self._thread.start()
+            # A failed GLFW/GL context used to leave a dead thread object behind.
+            # Later renders would enqueue work to that dead thread and wait for
+            # timeouts.  Reset the worker state so a recoverable driver/context
+            # failure can be retried cleanly.
+            if self._thread is not None and not self._thread.is_alive():
+                self._thread = None
+            if self._thread is None:
+                self._ready.clear()
+                self._error = None
+                self._stop.clear()
+                self._thread = threading.Thread(target=self._thread_main, name="CRTFrameRenderer", daemon=True)
+                self._thread.start()
         self._ready.wait(timeout=8.0)
         if self._error:
             raise CRTGPUUnavailable(self._error)
@@ -417,12 +466,14 @@ class CRTFrameRenderer:
     def _handle_direct_job(self, glfw: Any, job: _DirectJob, direct: dict[str, tuple[Any, _ModernGLCRTBackend]]):
         import moderngl
 
-        s = job.settings.validated()
+        s = job.settings
         if job.key not in direct:
             if job.size is not None:
                 width, height = job.size
             else:
-                width, height = s.render_size_for(job.frame.shape)
+                fh, fw = int(job.frame.shape[0]), int(job.frame.shape[1])
+                width = int(s.render_width)
+                height = int(max(1, round(fh * (width / float(max(1, fw))))))
             glfw.window_hint(glfw.VISIBLE, glfw.TRUE)
             window = glfw.create_window(int(width), int(height), job.title, None, None)
             if not window:
@@ -499,6 +550,8 @@ class CRTFrameRenderer:
             except Exception:
                 pass
             self._thread.join(timeout=2.0)
+            if not self._thread.is_alive():
+                self._thread = None
 
 
 def render_crt_frame_sync(

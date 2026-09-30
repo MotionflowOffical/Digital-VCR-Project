@@ -25,3 +25,5 @@ tapes\
 dist\
 
 build\
+# Rust native-core build output
+native/digital_vcr_core/target/
