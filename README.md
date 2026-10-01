@@ -16,15 +16,6 @@ V8.1 adds a Windows installer build workflow, application/installer branding, an
 - Windows built-in audio playback plus MP4 export with optional audio mux.
 - Backward-compatible bundle loading for older tape bundle layouts.
 
-
-## V8.1 Updates
-
-- Added a Windows installer builder (`build_installer.bat`) using Inno Setup 6.
-- Added the new transparent Digital VCR logo as the application, executable, shortcut, and installer icon.
-- Embedded V8.1 into the Windows executable file-version/product-version metadata.
-- Updated package/UI version identifiers to V8.1.
-- The installer includes the complete PyInstaller application folder and creates Start Menu and optional Desktop shortcuts.
-
 ## V8.0 Updates
 
 - Restored the missing CRT TV application wiring on top of the optimized playback/RF branch: Player preview, Live preview, direct OpenGL windows, settings persistence, and CRT-baked exports are connected again.
@@ -42,28 +33,14 @@ V8.1 adds a Windows installer build workflow, application/installer branding, an
 - CRT output remains isolated through the CRT renderer thread; no Live worker touches ModernGL or GLFW directly.
 - Updated CRT and Live setting help text.
 
-## Previous Updates
+## V8.1 Updates
 
-### V6_13_8
-- Added a dedicated **CRT TV** tab with Consumer TV and Pro Monitor presets.
-- Added a GPU CRT renderer built on **ModernGL + GLFW / OpenGL 3.3**.
-- CRT simulation can be enabled independently for Player preview, Live preview/overlay, direct OpenGL Player/Live windows, and MP4 exports.
-- CRT export bakes the display simulation into the rendered video only; tape tracks and bundle media remain unchanged.
-- Added simulated phosphor resolution controls so masks are rendered at a higher internal resolution before display/downsample.
-- Simulated phosphor masks, scanline beam profile, convergence, curvature, overscan, edge focus, bloom, halation, vignette, and phosphor decay.
-- Added CRT settings persistence in presets/bundles while keeping older settings files compatible.
-- Added GPU smoke/export tests for the CRT path.
-
-### V6_13_7
-- Rebuilt the desktop UI with **CustomTkinter**, left-sidebar navigation, a dark Studio Console palette, and gradient-backed app shell.
-- Added `?` hover help beside user-adjustable settings so ranges explain low/mid/high behavior, visual/audio/performance impact, and whether changes are baked or playback-only.
-- Refreshed the desktop UI with a professional dark theme and clearer playback controls.
-- Fixed unsafe worker-thread access to Tk variables during load, record, live capture, and proxy playback.
-- Added in-app tape audio preview and clearer playback audio status, so audio does not need to be exported just to check it.
-- Removed duplicated ffmpeg audio extraction during recording for faster record startup and lower CPU/disk load.
-- Fixed live-mode status updates and camera release behavior.
-
-
+- Added a Windows installer builder (`build_installer.bat`) using Inno Setup 6.
+- Added the new transparent Digital VCR logo as the application, executable, shortcut, and installer icon.
+- Embedded V8.1 into the Windows executable file-version/product-version metadata.
+- Updated package/UI version identifiers to V8.1.
+- The installer includes the complete PyInstaller application folder and creates Start Menu and optional Desktop shortcuts.
+- 
 ## Run
 
 ```bash
