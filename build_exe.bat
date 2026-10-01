@@ -3,6 +3,12 @@ setlocal
 cd /d "%~dp0"
 set "DIST_DIR=%CD%\dist\DigitalVCR"
 set "EXE_PATH=%DIST_DIR%\DigitalVCR.exe"
+set "ICON_PATH=%CD%\assets\DigitalVCR.ico"
+
+if not exist "%ICON_PATH%" (
+  echo ERROR: Application icon is missing: "%ICON_PATH%"
+  exit /b 1
+)
 
 if not exist .venv py -m venv .venv
 

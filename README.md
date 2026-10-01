@@ -1,5 +1,9 @@
-# Digital VCR (V8.0)
+# Digital VCR (V8.1)
 
+
+A desktop VHS-style video recorder, live camera processor, CRT display simulator, and MP4 exporter built with CustomTkinter, OpenCV, NumPy, ModernGL, and GLFW.
+
+V8.1 adds a Windows installer build workflow, application/installer branding, and consistent Windows version metadata while retaining the V8.0 playback, CRT, RF, and stability work.
 
 ## Highlights
 
@@ -13,7 +17,17 @@
 - Backward-compatible bundle loading for older tape bundle layouts.
 
 
+## V8.1 Updates
+
+- Added a Windows installer builder (`build_installer.bat`) using Inno Setup 6.
+- Added the new transparent Digital VCR logo as the application, executable, shortcut, and installer icon.
+- Embedded V8.1 into the Windows executable file-version/product-version metadata.
+- Updated package/UI version identifiers to V8.1.
+- The installer includes the complete PyInstaller application folder and creates Start Menu and optional Desktop shortcuts.
+
 ## V8.0 Updates
+
+- Restored the missing CRT TV application wiring on top of the optimized playback/RF branch: Player preview, Live preview, direct OpenGL windows, settings persistence, and CRT-baked exports are connected again.
 - Fixed the CRT phosphor-history path so previous-frame history is copied framebuffer-to-framebuffer entirely on the GPU instead of falling back to a GPU→CPU→GPU round-trip every frame.
 - CRT source upload can now use texture channel swizzling to consume OpenCV BGR frames directly, avoiding a full-frame BGR→RGB allocation on supported OpenGL drivers.
 - Static CRT shader uniforms are cached and resent only when settings/resolution change; the shader equations and visual model are unchanged.
@@ -60,6 +74,28 @@ python main.py
 ```
 
 CRT implementation files live in `vcr/crt.py` and `vcr/crt_renderer.py`.
+
+## Build the Windows installer
+
+Run from the project root:
+
+```bat
+build_installer.bat
+```
+
+The script builds the PyInstaller application first, locates Inno Setup 6, and creates:
+
+```text
+installer\output\Digital-VCR-V8.1-Setup.exe
+```
+
+If the EXE was already built and you only want to rebuild the installer:
+
+```bat
+build_installer.bat --skip-exe
+```
+
+The installer places Digital VCR in Program Files, creates a Start Menu shortcut, offers an optional Desktop shortcut, and includes the V8.1 uninstaller entry.
 
 ## Requirements
 

@@ -22,6 +22,7 @@ class _RenderJob:
     settings: CRTSettings
     output_size: tuple[int, int] | None
     result: queue.Queue
+    cancelled: threading.Event
 
 
 @dataclass
@@ -355,7 +356,14 @@ class _ModernGLCRTBackend:
 
 class CRTFrameRenderer:
     def __init__(self):
+        # Off-screen render/control jobs are ordered and must not be starved.
+        # Direct presentation is intentionally *not* queued frame-by-frame: a
+        # window only needs the newest frame. Keeping old direct frames caused
+        # queue growth, preview timeouts and playback-clock jumps when a GLFW
+        # window was resized/minimized or VSync blocked.
         self._jobs: queue.Queue = queue.Queue()
+        self._direct_pending: dict[str, _DirectJob] = {}
+        self._direct_lock = threading.Lock()
         self._ready = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -409,30 +417,54 @@ class CRTFrameRenderer:
             self._ready.set()
 
             while not self._stop.is_set():
+                job = None
                 try:
-                    job = self._jobs.get(timeout=0.01)
+                    # Render/control work has priority.  Direct windows consume
+                    # only their latest pending frame below, so they can never
+                    # build a backlog in front of integrated preview renders.
+                    job = self._jobs.get(timeout=0.004)
                 except queue.Empty:
-                    if glfw is not None:
-                        glfw.poll_events()
-                    continue
+                    pass
 
                 if isinstance(job, _RenderJob):
-                    try:
-                        glfw.make_context_current(hidden_window)
-                        out = hidden_backend.render_to_array(job.frame, job.settings, job.output_size)
-                        job.result.put((True, out))
-                    except Exception as exc:
-                        job.result.put((False, exc))
-                elif isinstance(job, _DirectJob):
-                    try:
-                        self._handle_direct_job(glfw, job, direct)
-                    except Exception:
+                    if not job.cancelled.is_set():
                         try:
-                            self._close_direct_key(glfw, job.key, direct)
-                        except Exception:
-                            pass
+                            glfw.make_context_current(hidden_window)
+                            out = hidden_backend.render_to_array(job.frame, job.settings, job.output_size)
+                            if not job.cancelled.is_set():
+                                job.result.put_nowait((True, out))
+                        except Exception as exc:
+                            if not job.cancelled.is_set():
+                                try:
+                                    job.result.put_nowait((False, exc))
+                                except queue.Full:
+                                    pass
                 elif isinstance(job, _CloseDirectJob):
                     self._close_direct_key(glfw, job.key, direct)
+                    try:
+                        glfw.make_context_current(hidden_window)
+                    except Exception:
+                        pass
+
+                # Present at most the newest frame for each direct window.
+                # Pulling from a small dict rather than a FIFO is the key to
+                # keeping window presentation from starving preview rendering.
+                with self._direct_lock:
+                    direct_jobs = list(self._direct_pending.values())
+                    self._direct_pending.clear()
+                for djob in direct_jobs:
+                    try:
+                        self._handle_direct_job(glfw, djob, direct)
+                    except Exception:
+                        try:
+                            self._close_direct_key(glfw, djob.key, direct)
+                        except Exception:
+                            pass
+                    finally:
+                        try:
+                            glfw.make_context_current(hidden_window)
+                        except Exception:
+                            pass
 
                 if glfw is not None:
                     glfw.poll_events()
@@ -440,6 +472,10 @@ class CRTFrameRenderer:
                         win, _backend = direct[key]
                         if glfw.window_should_close(win):
                             self._close_direct_key(glfw, key, direct)
+                            try:
+                                glfw.make_context_current(hidden_window)
+                            except Exception:
+                                pass
 
         except Exception as exc:
             self._error = str(exc)
@@ -496,9 +532,20 @@ class CRTFrameRenderer:
         if item is None:
             return
         window, backend = item
+        # ModernGL objects must be released while the context that owns them is
+        # current. Releasing after another context became current could leave a
+        # driver in a bad state and make the hidden preview context render black.
+        if glfw is not None:
+            try:
+                glfw.make_context_current(window)
+            except Exception:
+                pass
         backend.release()
         if glfw is not None:
-            glfw.destroy_window(window)
+            try:
+                glfw.destroy_window(window)
+            except Exception:
+                pass
 
     def render_frame(
         self,
@@ -515,10 +562,15 @@ class CRTFrameRenderer:
 
         self._start()
         result: queue.Queue = queue.Queue(maxsize=1)
-        self._jobs.put(_RenderJob(frame_bgr.copy(), s, output_size, result))
+        cancelled = threading.Event()
+        job = _RenderJob(frame_bgr.copy(), s, output_size, result, cancelled)
+        self._jobs.put(job)
         try:
             ok, payload = result.get(timeout=max(0.1, float(timeout)))
         except queue.Empty as exc:
+            # Do not let timed-out frames become expensive stale work later.
+            # The worker will cheaply skip this job if it has not started yet.
+            cancelled.set()
             raise CRTGPUUnavailable("Timed out while rendering CRT frame.") from exc
         if not ok:
             raise CRTGPUUnavailable(str(payload))
@@ -536,11 +588,18 @@ class CRTFrameRenderer:
         if not s.enabled:
             return
         self._start()
-        self._jobs.put(_DirectJob(str(key), frame_bgr.copy(), s, str(title), size))
+        # Latest-frame mailbox: overwrite an older unsent direct frame instead
+        # of queueing every playback frame.  This keeps latency bounded.
+        djob = _DirectJob(str(key), frame_bgr.copy(), s, str(title), size)
+        with self._direct_lock:
+            self._direct_pending[str(key)] = djob
 
     def close_direct(self, key: str) -> None:
+        key = str(key)
+        with self._direct_lock:
+            self._direct_pending.pop(key, None)
         if self._thread is not None:
-            self._jobs.put(_CloseDirectJob(str(key)))
+            self._jobs.put(_CloseDirectJob(key))
 
     def close(self):
         self._stop.set()

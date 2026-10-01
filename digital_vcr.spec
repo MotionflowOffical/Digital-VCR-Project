@@ -25,6 +25,10 @@ hiddenimports += [
 datas = []
 datas += collect_data_files('imageio_ffmpeg')
 datas += collect_data_files('customtkinter')
+assets_dir = Path('assets')
+if assets_dir.exists():
+    datas.append((str(assets_dir / 'DigitalVCR.ico'), 'assets'))
+    datas.append((str(assets_dir / 'DigitalVCR.png'), 'assets'))
 
 binaries = []
 binaries += collect_dynamic_libs('cv2')
@@ -63,6 +67,8 @@ exe = EXE(
     upx=True,
     console=False,
     disable_windowed_traceback=False,
+    icon='assets/DigitalVCR.ico',
+    version='version_info.txt',
 )
 
 coll = COLLECT(

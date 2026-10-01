@@ -12,6 +12,7 @@ import time
 import traceback
 import datetime
 import json
+import sys
 
 from ..tape import TapeImage, TapeCartridge, TapeTrack
 from ..bundle import save_bundle, load_bundle, create_blank_bundle
@@ -34,7 +35,12 @@ from ..crt import (
 )
 from ..crt_renderer import CRTFrameRenderer, CRTGPUUnavailable
 
-APP_VERSION = "V8.0"
+APP_VERSION = "V8.1"
+
+def _resource_path(*parts: str) -> Path:
+    """Resolve project assets both from source and from a PyInstaller build."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    return base.joinpath(*parts)
 
 DARK_BG = "#0b0f14"
 PANEL_BG = "#111821"
@@ -403,6 +409,13 @@ class DigitalVCRApp:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title(f"Digital VCR {APP_VERSION}")
+        try:
+            icon_path = _resource_path("assets", "DigitalVCR.ico")
+            if icon_path.exists():
+                self.root.iconbitmap(default=str(icon_path))
+        except Exception:
+            # The executable itself still carries the icon even if Tk cannot load it.
+            pass
         self.root.geometry("1240x760")
         self.root.minsize(1080, 640)
         self.root.configure(bg=DARK_BG)
@@ -424,6 +437,10 @@ class DigitalVCRApp:
         self._cached_crt_settings = self.crt_settings
         self.crt_renderer = CRTFrameRenderer()
         self._crt_last_error = None
+        # Track direct-window lifecycle edges so the cache loop does not enqueue
+        # close commands every 120 ms after the CRT renderer has started.
+        self._crt_direct_player_active = False
+        self._crt_direct_live_active = False
 
         # Active tape in memory
         self.tape_live = TapeImage(cart=TapeCartridge(length_tracks=18000))
@@ -661,15 +678,41 @@ class DigitalVCRApp:
                 crt = self._current_crt_settings()
                 self._cached_crt_settings = crt
                 self.crt_settings = crt
-                if not (crt.enabled and crt.direct_player):
-                    self.crt_renderer.close_direct("player")
-                if not (crt.enabled and crt.direct_live):
-                    self.crt_renderer.close_direct("live")
+                self._sync_crt_direct_lifecycle(crt)
             except Exception:
                 pass
         except Exception:
             # If UI vars not ready yet, keep last cached
             pass
+
+
+    def _sync_crt_direct_lifecycle(self, crt: CRTSettings):
+        """Close direct CRT windows only on enabled->disabled transitions.
+
+        The settings cache runs several times per second.  Re-enqueueing a close
+        command on every pass caused unnecessary renderer queue traffic after a
+        direct window had been used.  Edge-triggered cleanup is both cheaper and
+        much safer when preview rendering is active at the same time.
+        """
+        want_player = bool(crt.enabled and crt.direct_player)
+        want_live = bool(crt.enabled and crt.direct_live)
+
+        prev_player = bool(getattr(self, "_crt_direct_player_active", False))
+        prev_live = bool(getattr(self, "_crt_direct_live_active", False))
+
+        if prev_player and not want_player:
+            try:
+                self.crt_renderer.close_direct("player")
+            except Exception:
+                pass
+        if prev_live and not want_live:
+            try:
+                self.crt_renderer.close_direct("live")
+            except Exception:
+                pass
+
+        self._crt_direct_player_active = want_player
+        self._crt_direct_live_active = want_live
 
     def _show_image(self, label: tk.Label, bgr: np.ndarray):
         if bgr is None:
@@ -2987,6 +3030,7 @@ class DigitalVCRApp:
                 if frame is not None:
                     crt = getattr(self, "_cached_crt_settings", getattr(self, "crt_settings", preset_by_name("Consumer TV").validated()))
                     raw_for_direct = frame
+                    crt_stage_started = time.perf_counter()
                     if crt.enabled and crt.preview_enabled:
                         try:
                             frame = self.crt_renderer.render_frame(frame, crt, timeout=3.0)
@@ -2999,6 +3043,19 @@ class DigitalVCRApp:
                             self.crt_renderer.submit_direct("player", raw_for_direct, crt, "Digital VCR - CRT Player")
                         except Exception as exc:
                             self._report_crt_error(exc, "direct player")
+
+                    # Opening/resizing a GL window or a driver hiccup is display
+                    # latency, not elapsed tape-transport time.  Without this
+                    # guard a multi-second CRT stall is consumed by the next
+                    # VCRPlayer.update(), which can jump hundreds of fields into
+                    # blank tape and leave the integrated preview black.
+                    crt_elapsed = time.perf_counter() - crt_stage_started
+                    if crt_elapsed > max(0.25, period * 4.0):
+                        try:
+                            with self._player_lock:
+                                self.player._t_last = time.perf_counter()
+                        except Exception:
+                            pass
 
                 self._latest_play_frame = frame
                 self._play_worker_error = None

@@ -1,4 +1,4 @@
-__version__ = "V6_13_7"
+__version__ = "V8.1"
 
 __all__ = [
     "tape", "bundle", "modulation", "defects",
