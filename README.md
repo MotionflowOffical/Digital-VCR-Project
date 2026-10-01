@@ -36,7 +36,6 @@ V8.1 adds a Windows installer build workflow, application/installer branding, an
 ## V8.1 Updates
 
 - Added a Windows installer builder (`build_installer.bat`) using Inno Setup 6.
-- Added the new transparent Digital VCR logo as the application, executable, shortcut, and installer icon.
 - Embedded V8.1 into the Windows executable file-version/product-version metadata.
 - Updated package/UI version identifiers to V8.1.
 - The installer includes the complete PyInstaller application folder and creates Start Menu and optional Desktop shortcuts.
